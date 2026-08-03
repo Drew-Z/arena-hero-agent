@@ -90,6 +90,13 @@ docker compose down
 
 The secret file stays on the host and is never copied into the image. Docker Compose mounts it under `/run/secrets` for the entrypoint to read.
 
+Tagged releases publish a prebuilt image to GHCR. To deploy it without building:
+
+```bash
+ARENA_HERO_AGENT_IMAGE=ghcr.io/drew-z/arena-hero-agent:0.1.0 docker compose pull
+ARENA_HERO_AGENT_IMAGE=ghcr.io/drew-z/arena-hero-agent:0.1.0 docker compose up -d --no-build
+```
+
 ## Linux systemd Server
 
 The installer targets standard systemd distributions and requires root, `useradd`, Python 3.11+, and network access to install Python dependencies.
