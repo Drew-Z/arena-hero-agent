@@ -69,6 +69,12 @@ docker compose logs -f agent
 
 Compose mounts the key as a Docker secret. The image runs as an unprivileged user with a read-only filesystem and does not include the supervisor or optimizer.
 
+Use the published image without a local build:
+
+```bash
+ARENA_HERO_AGENT_IMAGE=ghcr.io/drew-z/arena-hero-agent:0.1.0 docker compose up -d --no-build
+```
+
 ### Linux server with systemd
 
 From a checked-out release on the server:

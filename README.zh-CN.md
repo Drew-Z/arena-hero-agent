@@ -57,6 +57,12 @@ docker compose logs -f agent
 
 Compose 会以 Docker secret 挂载 key。容器使用非特权用户和只读文件系统，默认不包含 supervisor 与 optimizer。
 
+无需本地构建，直接使用发布镜像：
+
+```bash
+ARENA_HERO_AGENT_IMAGE=ghcr.io/drew-z/arena-hero-agent:0.1.0 docker compose up -d --no-build
+```
+
 ### Linux 服务器 systemd
 
 在服务器上的项目发布目录执行：
