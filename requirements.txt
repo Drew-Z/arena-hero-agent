@@ -1,2 +1,2 @@
-arena-hero==0.2.6
+arena-hero==0.2.8
 httpx==0.28.1

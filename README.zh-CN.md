@@ -22,7 +22,7 @@
 - Docker 部署需要 Docker Compose v2
 - 服务器无人值守部署需要 systemd Linux
 
-当前验证的协议是 API `v0.1`、玩法规则 `v0.11`、官方 Python SDK `0.2.6`。
+当前验证的协议是 API `v0.1`、玩法规则 `v0.13`、官方 Python SDK `0.2.8`。
 
 ## 最快开始
 

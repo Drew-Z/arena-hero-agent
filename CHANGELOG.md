@@ -8,6 +8,13 @@ All notable changes to this project will be documented in this file. The format 
 
 - Tolerant stationary-Core confirmation across short visibility gaps, while still requiring three real same-position observations before a raid.
 - Structured v0.11 upkeep due/paid/deficit and excess-Unit damage diagnostics with deterministic supervisor and optional model-review triggers.
+- Bounded long-range raids against confirmed stationary, unprotected Cores, with strike-distance hysteresis and immediate combat-pressure recall.
+- Gameplay v0.13 and official SDK 0.2.8 compatibility, including conservative Ranger cell fire against a confirmed stationary Core during short visibility gaps.
+
+### Changed
+
+- Resource targets now use deterministic minimum-cost Worker matching with limited intent stickiness instead of preserving a worse assignment indefinitely.
+- Scout routes prefer less recently covered chunks and rotate after three consecutive non-improving Ticks.
 
 ## [0.1.0] - 2026-08-03
 

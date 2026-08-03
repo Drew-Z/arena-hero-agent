@@ -9,7 +9,7 @@ The mature target is:
 | Unit | Target | Role |
 | --- | ---: | --- |
 | Worker | 12 | Harvest, deposit, scout, observe, and recover dropped cargo. |
-| Vanguard | 3 | Outer screen, route clearing, and bounded assault reinforcement. |
+| Vanguard | 3 | Outer screen, route screening, and bounded assault reinforcement. |
 | Ranger | 4 | Inner Core defense and ranged stationary-target clearing. |
 | Total | 19 | Remains below the 20-population resource penalty. |
 
@@ -26,8 +26,8 @@ Production reserves resources between stages and does not build beyond the confi
 ## Economy and Scouting
 
 - Resource cells are treated as dynamic observations, not permanent terrain.
-- Workers reserve targets, detect repeated entry/harvest blocking, and release stale assignments.
-- Scouting prioritizes the least recently observed chunks and avoids sending every Worker through the same corridor.
+- Empty Workers and remembered resource cells are paired with deterministic minimum-cost matching. A small intent bonus prevents churn, but a materially closer Worker can take over a target; each resource remains assigned to at most one Worker.
+- Resource routes are released after six non-improving Ticks. Scout routes change direction after three non-improving Ticks, prioritize the least recently observed chunks, and avoid sending every Worker through the same corridor.
 - Loaded Workers prioritize a legal return route and account for Core movement.
 - Recovery mode protects the replacement Worker and dropped cargo after a Core loss.
 
@@ -35,7 +35,8 @@ Production reserves resources between stages and does not build beyond the confi
 
 - Active enemy fleets cause spacing, screening, and fighting withdrawal rather than an unconditional stop.
 - Confirmed stationary units can be cleared by a small bounded strike group while guards remain with the Core.
-- A stationary Core is considered for a raid only after repeated observations and isolation checks. The Worker that exposed it may remain as the designated observer.
+- A stationary Core is considered for a raid only after repeated observations and isolation checks. The Worker that exposed it may remain as the designated observer. The default strike group can engage from at most 48 path-independent Manhattan cells and releases a target if pulled beyond 56, while one Vanguard and one Ranger remain as Core guards.
+- Under gameplay v0.13, a strike Ranger may fire at the remembered cell of that confirmed stationary Core during a short visibility gap. Cell fire is not used for unconfirmed or mobile targets.
 - Loss of visibility does not immediately invalidate stationary-target memory, but moving escorts, contradictory observations, age, and risk reduce confidence.
 - Loot events, storage capacity, same-Tick Core survival, and return-path cost determine whether a kill was economically useful.
 

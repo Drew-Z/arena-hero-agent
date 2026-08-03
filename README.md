@@ -34,7 +34,7 @@ flowchart LR
 - Docker Compose v2 for the container path
 - A systemd-based Linux server for the unattended server path
 
-The tested contract is API `v0.1`, gameplay `v0.11`, and official Python SDK `0.2.6`. The bundled version monitor fails closed when it detects an incompatible contract.
+The tested contract is API `v0.1`, gameplay `v0.13`, and official Python SDK `0.2.8`. The bundled version monitor fails closed when it detects an incompatible contract.
 
 ## Quick Start
 

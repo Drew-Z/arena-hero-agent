@@ -59,7 +59,8 @@ VANGUARD_CORE_GUARDS = 1
 RANGER_CORE_GUARDS = 1
 ISOLATED_CORE_CONFIRM_TICKS = 2
 CORE_VISIBILITY_GAP_TICKS = 2
-CORE_RAID_STRIKE_MAX_DISTANCE = 24
+CORE_RAID_STRIKE_MAX_DISTANCE = 48
+CORE_RAID_STRIKE_RELEASE_DISTANCE = 56
 CORE_RAID_MEMORY_TTL = 16
 CORE_OBSERVER_MIN_DISTANCE = 2
 CORE_OBSERVER_MAX_DISTANCE = 3
@@ -79,6 +80,8 @@ STATIONARY_CORE_MEMORY_TTL = 256
 RESOURCE_MEMORY_TTL = 64
 RESOURCE_STALL_TICKS = 6
 RESOURCE_COOLDOWN_TICKS = 8
+RESOURCE_ASSIGNMENT_STICKY_BONUS = 2
+SCOUT_STALL_TICKS = 3
 RECOVERY_TICKS = 160
 RECOVERY_MIN_WORKERS = 6
 RECOVERY_MIN_RESOURCES = 20
@@ -192,6 +195,13 @@ class ResourceProgress:
 
 
 @dataclass(slots=True)
+class ScoutProgress:
+    target: Position
+    best_cost: int
+    stalled_turns: int = 0
+
+
+@dataclass(slots=True)
 class EnemyCoreSighting:
     position: Position
     first_tick: int
@@ -295,6 +305,81 @@ def load_api_key(
 
 def _distance(left: Position, right: Position) -> int:
     return abs(left[0] - right[0]) + abs(left[1] - right[1])
+
+
+def _core_raid_strike_distance(
+    position: Position,
+    vanguards: Sequence[object],
+    rangers: Sequence[object],
+) -> int:
+    return max(
+        min(_distance(defender.position, position) for defender in vanguards),
+        min(_distance(defender.position, position) for defender in rangers),
+    )
+
+
+def _minimum_cost_assignment(costs: Sequence[Sequence[int]]) -> tuple[int, ...]:
+    """Return one deterministic minimum-cost column for each matrix row."""
+    if not costs:
+        return ()
+    row_count = len(costs)
+    column_count = len(costs[0])
+    if column_count < row_count or any(
+        len(row) != column_count for row in costs
+    ):
+        raise ValueError("assignment matrix must be rectangular with rows <= columns")
+
+    row_potential = [0] * (row_count + 1)
+    column_potential = [0] * (column_count + 1)
+    matched_row = [0] * (column_count + 1)
+    previous_column = [0] * (column_count + 1)
+
+    for row_index in range(1, row_count + 1):
+        matched_row[0] = row_index
+        current_column = 0
+        minimum_slack = [sys.maxsize] * (column_count + 1)
+        visited = [False] * (column_count + 1)
+        while True:
+            visited[current_column] = True
+            current_row = matched_row[current_column]
+            delta = sys.maxsize
+            next_column = 0
+            for column_index in range(1, column_count + 1):
+                if visited[column_index]:
+                    continue
+                reduced_cost = (
+                    costs[current_row - 1][column_index - 1]
+                    - row_potential[current_row]
+                    - column_potential[column_index]
+                )
+                if reduced_cost < minimum_slack[column_index]:
+                    minimum_slack[column_index] = reduced_cost
+                    previous_column[column_index] = current_column
+                if minimum_slack[column_index] < delta:
+                    delta = minimum_slack[column_index]
+                    next_column = column_index
+            for column_index in range(column_count + 1):
+                if visited[column_index]:
+                    row_potential[matched_row[column_index]] += delta
+                    column_potential[column_index] -= delta
+                else:
+                    minimum_slack[column_index] -= delta
+            current_column = next_column
+            if matched_row[current_column] == 0:
+                break
+        while True:
+            next_column = previous_column[current_column]
+            matched_row[current_column] = matched_row[next_column]
+            current_column = next_column
+            if current_column == 0:
+                break
+
+    assignment = [-1] * row_count
+    for column_index in range(1, column_count + 1):
+        row_index = matched_row[column_index]
+        if row_index:
+            assignment[row_index - 1] = column_index - 1
+    return tuple(assignment)
 
 
 def _destination(position: Position, direction: Direction) -> Position:
@@ -1087,6 +1172,7 @@ class CoreFarmer:
         self.known_obstacles: set[Position] = set()
         self.scout_slots: dict[UUID, int] = {}
         self.scout_stages: dict[UUID, int] = {}
+        self.scout_progress: dict[UUID, ScoutProgress] = {}
         self.scout_target_last_visited: dict[Position, int] = {}
         self.scout_claims: set[Position] = set()
         self.scout_chunk_last_seen: dict[Position, int] = {}
@@ -1480,6 +1566,12 @@ class CoreFarmer:
                         or visible_target.position != remembered.position
                     )
                 )
+                or _core_raid_strike_distance(
+                    remembered.position,
+                    vanguard_strike_group,
+                    ranger_strike_group,
+                )
+                > CORE_RAID_STRIKE_RELEASE_DISTANCE
             ):
                 self._release_core_raid()
                 return None
@@ -1514,15 +1606,10 @@ class CoreFarmer:
                 continue
             if self._core_is_protected(turn, enemy_core.position):
                 continue
-            strike_distance = max(
-                min(
-                    _distance(defender.position, enemy_core.position)
-                    for defender in vanguard_strike_group
-                ),
-                min(
-                    _distance(defender.position, enemy_core.position)
-                    for defender in ranger_strike_group
-                ),
+            strike_distance = _core_raid_strike_distance(
+                enemy_core.position,
+                vanguard_strike_group,
+                ranger_strike_group,
             )
             if strike_distance > CORE_RAID_STRIKE_MAX_DISTANCE:
                 continue
@@ -1775,54 +1862,47 @@ class CoreFarmer:
             self.resource_intents = {}
             return {}
 
-        assignments: dict[UUID, Position] = {}
-        claimed_resources: set[Position] = set()
-        for worker in sorted(workers, key=_uuid_sort_key):
-            previous_target = self.resource_intents.get(worker.id)
-            if previous_target not in available_resources:
-                continue
-            if previous_target in claimed_resources:
-                continue
-            if self.resource_cooldowns.get((worker.id, previous_target), 0) > tick:
-                continue
-            assignments[worker.id] = previous_target
-            claimed_resources.add(previous_target)
-
-        edges: list[tuple[int, int, int, bytes, int, int, UUID, Position]] = []
-        for worker in workers:
-            if worker.id in assignments:
-                continue
-            for cell, last_seen in self.resource_last_seen.items():
-                if cell not in available_resources or cell in claimed_resources:
-                    continue
+        ordered_workers = sorted(workers, key=_uuid_sort_key)
+        ordered_resources = sorted(available_resources)
+        unassigned_cost = PATH_COST_UNREACHABLE * (len(ordered_workers) + 1)
+        forbidden_cost = unassigned_cost * 2
+        cost_matrix: list[list[int]] = []
+        for worker in ordered_workers:
+            row = []
+            for cell in ordered_resources:
                 if self.resource_cooldowns.get((worker.id, cell), 0) > tick:
+                    row.append(forbidden_cost)
                     continue
                 path_cost = _estimated_path_cost(worker.position, cell, blocked)
                 if path_cost >= PATH_COST_UNREACHABLE:
+                    row.append(forbidden_cost)
                     continue
-                distance = _distance(worker.position, cell)
-                age = tick - last_seen
+                age = tick - self.resource_last_seen[cell]
                 stale_penalty = 0 if age == 0 else min(6, 2 + age // 8)
-                edges.append(
-                    (
-                        path_cost + stale_penalty,
-                        stale_penalty,
-                        distance,
-                        _uuid_sort_key(worker),
-                        cell[0],
-                        cell[1],
-                        worker.id,
-                        cell,
-                    )
+                sticky_bonus = (
+                    RESOURCE_ASSIGNMENT_STICKY_BONUS
+                    if self.resource_intents.get(worker.id) == cell
+                    else 0
                 )
+                row.append(
+                    max(0, path_cost + stale_penalty - sticky_bonus)
+                )
+            row.extend([unassigned_cost] * len(ordered_workers))
+            cost_matrix.append(row)
 
-        for *_, worker_id, cell in sorted(edges):
-            if worker_id in assignments or cell in claimed_resources:
+        assignments: dict[UUID, Position] = {}
+        for row_index, (worker, column_index) in enumerate(
+            zip(
+                ordered_workers,
+                _minimum_cost_assignment(cost_matrix),
+                strict=True,
+            )
+        ):
+            if column_index >= len(ordered_resources):
                 continue
-            assignments[worker_id] = cell
-            claimed_resources.add(cell)
-            if len(assignments) == len(workers):
-                break
+            if cost_matrix[row_index][column_index] >= forbidden_cost:
+                continue
+            assignments[worker.id] = ordered_resources[column_index]
 
         self.resource_intents = assignments
         return assignments
@@ -1844,6 +1924,7 @@ class CoreFarmer:
         for worker_id in set(self.scout_slots) - living_ids:
             self.scout_slots.pop(worker_id, None)
             self.scout_stages.pop(worker_id, None)
+            self.scout_progress.pop(worker_id, None)
             self.worker_history.pop(worker_id, None)
 
         used_slots = set(self.scout_slots.values())
@@ -1917,6 +1998,10 @@ class CoreFarmer:
         target = min(
             candidates,
             key=lambda candidate: (
+                self.scout_chunk_last_seen.get(
+                    _chunk_coordinates(candidate),
+                    -1,
+                ),
                 self.scout_target_last_visited.get(candidate, -1),
                 -_chunk_resource_quota(candidate),
                 _distance(core_position, candidate),
@@ -1941,6 +2026,29 @@ class CoreFarmer:
             self.scout_stages[worker_id] + 1
         ) % SCOUT_STAGE_CYCLE
 
+    def _scout_route_stalled(
+        self,
+        worker: object,
+        target: Position,
+        context: MovementContext,
+    ) -> bool:
+        blocked = (
+            set(context.obstacles)
+            | set(context.enemy_cells)
+            | set(context.danger_cells)
+        )
+        cost = _estimated_path_cost(worker.position, target, blocked)
+        progress = self.scout_progress.get(worker.id)
+        if progress is None or progress.target != target:
+            self.scout_progress[worker.id] = ScoutProgress(target, cost)
+            return False
+        if cost < progress.best_cost:
+            progress.best_cost = cost
+            progress.stalled_turns = 0
+            return False
+        progress.stalled_turns += 1
+        return progress.stalled_turns >= SCOUT_STALL_TICKS
+
     def _control_empty_worker(
         self,
         worker: object,
@@ -1956,11 +2064,13 @@ class CoreFarmer:
             assigned_target == worker.position
             and worker.position in current_resources
         ):
+            self.scout_progress.pop(worker.id, None)
             worker.harvest()
             self._set_worker_mode(worker, "HARVEST", worker.position)
             return
 
         if assigned_target is not None:
+            self.scout_progress.pop(worker.id, None)
             if _queue_toward(
                 worker,
                 assigned_target,
@@ -1981,11 +2091,21 @@ class CoreFarmer:
             claim=True,
         )
         if worker.position == target:
+            self.scout_progress.pop(worker.id, None)
             self._advance_scout(
                 worker.id,
                 visited_target=target,
                 tick=tick,
             )
+            target = self._scout_target(
+                worker.id,
+                core_position,
+                beacon_position,
+                claim=True,
+            )
+        elif self._scout_route_stalled(worker, target, context):
+            self.scout_progress.pop(worker.id, None)
+            self._advance_scout(worker.id)
             target = self._scout_target(
                 worker.id,
                 core_position,
@@ -2373,6 +2493,10 @@ class CoreFarmer:
                 context=context,
             )
 
+        for worker_id in tuple(self.scout_progress):
+            if not self.worker_modes.get(worker_id, "").startswith("SCOUT"):
+                self.scout_progress.pop(worker_id, None)
+
         self._control_vanguards(
             turn,
             mobile_enemies,
@@ -2609,12 +2733,18 @@ class CoreFarmer:
                 continue
             strike_member = ranger.id in strike_rangers
             if strike_member:
-                if visible_target is not None and _ranger_can_shoot(
+                can_shoot_target_cell = _ranger_can_shoot(
                     ranger.position,
                     isolated_core_target.position,
                     context.obstacles,
-                ):
+                )
+                if visible_target is not None and can_shoot_target_cell:
                     ranger.shoot(visible_target)
+                elif (
+                    isinstance(isolated_core_target, CoreRaidTarget)
+                    and can_shoot_target_cell
+                ):
+                    ranger.shoot_cell(isolated_core_target.position)
                 elif not _queue_toward(
                     ranger,
                     isolated_core_target.position,
