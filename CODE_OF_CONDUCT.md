@@ -34,7 +34,13 @@ This Code of Conduct applies within all community spaces and when an individual 
 
 ## Enforcement
 
-Report abusive, harassing, or otherwise unacceptable behavior privately through the process in `SECURITY.md`. All complaints will be reviewed promptly and fairly. Maintainers will respect the privacy and security of the reporter.
+Report abusive, harassing, or otherwise unacceptable behavior through GitHub's
+[private reporting form](https://github.com/Drew-Z/arena-hero-agent/security/advisories/new)
+and prefix the title with `[CONDUCT]`.
+That form is used only as a private transport; conduct reports follow this Code
+of Conduct and do not need vulnerability reproduction steps or impact analysis.
+All complaints will be reviewed promptly and fairly. Maintainers will respect
+the privacy and security of the reporter.
 
 ## Attribution
 

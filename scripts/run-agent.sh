@@ -1,7 +1,7 @@
 #!/bin/sh
 set -u
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_ROOT=$(dirname "$SCRIPT_DIR")
 AGENT="$PROJECT_ROOT/.venv/bin/arena-hero-agent"
 ENV_FILE=${ARENA_HERO_ENV_FILE:-$PROJECT_ROOT/.env}

@@ -99,7 +99,19 @@ ARENA_HERO_AGENT_IMAGE=ghcr.io/drew-z/arena-hero-agent:0.1.0 docker compose up -
 
 ## Linux systemd Server
 
-The installer targets standard systemd distributions and requires root, `useradd`, Python 3.11+, and network access to install Python dependencies.
+The installer targets standard systemd distributions and requires root,
+systemd, Python 3.11+, Python `venv` support, standard account/core utilities,
+and network access to install Python dependencies. On Debian or Ubuntu, install
+the common prerequisites with:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y python3 python3-venv ca-certificates
+```
+
+On RHEL-family systems, install the equivalent Python, pip/venv, systemd, and
+shadow-utils packages. The installer performs its command and `venv` preflight
+before creating service users or writing configuration.
 
 ### Default installation
 
@@ -115,7 +127,10 @@ This creates dedicated service users, installs the project into `/opt/arena-hero
 The installer runs the compatibility check once before starting the Agent. A
 failed or changed contract stops the installation before unattended play begins.
 
-The installer preserves an existing game credential and runtime tuning file during upgrades.
+The installer preserves an existing game credential and runtime tuning file
+during upgrades. After a successful compatibility check, it explicitly
+restarts the main Agent so an already-running installation cannot continue
+using old in-memory code.
 
 For non-interactive provisioning, put only the key on the first line of a protected file:
 
@@ -149,6 +164,26 @@ sudo sh scripts/install-systemd.sh --with-optimizer
 ```
 
 The optimizer runs as root, writes `/etc/arena-hero-agent/runtime.env`, and can restart the Agent. Enable it only after reviewing `arena_optimizer.py`, the service hardening, and the rollback behavior. It is not required for long-running collection.
+
+### Disable optional components
+
+Re-running the installer preserves optional component state unless an explicit
+enable or disable flag is supplied. Use these commands to converge an existing
+installation safely:
+
+```bash
+# Stop and disable supervisor runs, preserving its private AI config.
+sudo sh scripts/install-systemd.sh --without-supervisor
+
+# Remove the installed private AI config. A still-enabled supervisor becomes
+# deterministic-only on its next run.
+sudo sh scripts/install-systemd.sh --without-ai
+
+# Stop and disable the root optimizer.
+sudo sh scripts/install-systemd.sh --without-optimizer
+```
+
+`--with-*` and the corresponding `--without-*` option cannot be used together.
 
 ### Operations
 
@@ -192,7 +227,42 @@ sudo install -d -m 0700 /root/arena-hero-agent-backup
 sudo cp -a /etc/arena-hero-agent.env /etc/arena-hero-agent /root/arena-hero-agent-backup/
 ```
 
-To roll back, check out the previous release and rerun `sudo sh scripts/install-systemd.sh`. The installer upgrades the virtual environment from the selected source tree.
+To roll back, check out the previous release and rerun
+`sudo sh scripts/install-systemd.sh`. The installer updates the existing virtual
+environment from the selected source tree and restarts the Agent after the
+compatibility check. This is a source rollback, not an atomic environment
+snapshot: retain the previous release checkout or wheel and verify health after
+every update.
+
+### Uninstall
+
+To stop all activity while retaining credentials, runtime tuning, and reports:
+
+```bash
+sudo systemctl disable --now arena-hero-agent.service
+sudo systemctl disable --now arena-hero-version-monitor.timer
+sudo systemctl disable --now arena-hero-supervisor.timer
+sudo systemctl disable --now arena-hero-optimizer.timer
+sudo systemctl stop arena-hero-version-monitor.service arena-hero-supervisor.service arena-hero-optimizer.service
+```
+
+For a complete removal, first run the commands above, then remove only the
+project-owned units, installation, configuration, and state:
+
+```bash
+sudo rm -f /etc/systemd/system/arena-hero-agent.service
+sudo rm -f /etc/systemd/system/arena-hero-version-monitor.service /etc/systemd/system/arena-hero-version-monitor.timer
+sudo rm -f /etc/systemd/system/arena-hero-supervisor.service /etc/systemd/system/arena-hero-supervisor.timer
+sudo rm -f /etc/systemd/system/arena-hero-optimizer.service /etc/systemd/system/arena-hero-optimizer.timer
+sudo rm -rf /opt/arena-hero-agent /etc/arena-hero-agent /var/lib/arena-hero-supervisor /var/lib/arena-hero-optimizer
+sudo rm -f /etc/arena-hero-agent.env /etc/arena-hero-supervisor.env
+sudo systemctl daemon-reload
+sudo systemctl reset-failed
+```
+
+Complete removal permanently deletes credentials and local reports. Service
+accounts are intentionally retained because deleting users is host-policy
+specific.
 
 ## Credential Hygiene
 

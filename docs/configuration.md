@@ -63,6 +63,13 @@ Install the private configuration with:
 sudo sh scripts/install-systemd.sh --with-ai /secure/path/supervisor.env
 ```
 
+Remove the installed model credential and return an enabled supervisor to
+deterministic-only reports with:
+
+```bash
+sudo sh scripts/install-systemd.sh --without-ai
+```
+
 To validate a private model channel, run one synthetic review task per candidate model. This is an actual Responses request, not a short liveness ping:
 
 ```bash
@@ -77,3 +84,7 @@ python scripts/probe_model_channel.py \
 `arena-hero-optimizer` evaluates six-hour journal windows and can atomically adjust `/etc/arena-hero-agent/runtime.env`, restart the main service, and roll back a rejected candidate. Because that requires host control, its systemd service runs as root.
 
 It is disabled by default. Do not enable it in containers or on hosts where a game Agent must not have an automated restart path.
+
+Disable an existing optimizer timer with
+`sudo sh scripts/install-systemd.sh --without-optimizer`. See the deployment
+guide for supervisor disable and complete uninstall commands.

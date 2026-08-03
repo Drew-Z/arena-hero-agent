@@ -2,8 +2,11 @@ name: CI
 
 on:
   push:
+    branches:
+      - "**"
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -48,7 +51,13 @@ jobs:
       - name: Scan tracked files for credentials
         run: python scripts/check_secrets.py
       - name: Validate shell scripts
-        run: sh -n docker/entrypoint.sh scripts/bootstrap.sh scripts/run-agent.sh scripts/install-systemd.sh
+        run: |
+          sh -n docker/entrypoint.sh scripts/bootstrap.sh scripts/run-agent.sh scripts/install-systemd.sh
+          sh scripts/install-systemd.sh --help >/dev/null
+          if sh scripts/install-systemd.sh --with-supervisor --without-supervisor 2>/dev/null; then
+            echo "conflicting installer flags unexpectedly succeeded" >&2
+            exit 1
+          fi
       - name: Validate PowerShell scripts
         shell: pwsh
         run: |

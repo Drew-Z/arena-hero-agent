@@ -25,6 +25,27 @@ body:
       label: Agent version or commit
     validations:
       required: true
+  - type: input
+    id: python_version
+    attributes:
+      label: Python version
+      description: Run `python --version`, or enter unknown.
+    validations:
+      required: true
+  - type: input
+    id: contract_version
+    attributes:
+      label: Arena Hero API and gameplay contract
+      description: For example, API v0.1 / gameplay v0.13, or unknown.
+    validations:
+      required: true
+  - type: input
+    id: sdk_version
+    attributes:
+      label: Arena Hero Python SDK version
+      description: Run `python -c "import arena_hero; print(arena_hero.__version__)"`, or enter unknown.
+    validations:
+      required: true
   - type: dropdown
     id: deployment
     attributes:

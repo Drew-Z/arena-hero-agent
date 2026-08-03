@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Public documentation navigation, executable clone-first quick starts, compatibility fields in bug reports, and clearer community reporting guidance.
+- Release tags now pass the complete reusable CI workflow before publishing, with version validation, SBOM, provenance, and image-digest reporting.
 - Tolerant stationary-Core confirmation across short visibility gaps, while still requiring three real same-position observations before a raid.
 - Structured v0.11 upkeep due/paid/deficit and excess-Unit damage diagnostics with deterministic supervisor and optional model-review triggers.
 - Bounded long-range raids against confirmed stationary, unprotected Cores, with strike-distance hysteresis and immediate combat-pressure recall.
@@ -13,6 +15,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Changed
 
+- systemd upgrades now preflight host requirements, restart the Agent after compatibility validation, and support explicit supervisor, AI, and optimizer disable paths.
+- Docker Compose now uses the same graceful `SIGINT` shutdown contract as systemd.
 - Resource targets now use deterministic minimum-cost Worker matching with limited intent stickiness instead of preserving a worse assignment indefinitely.
 - Scout routes prefer less recently covered chunks and rotate after three consecutive non-improving Ticks.
 

@@ -9,6 +9,9 @@ SUPERVISOR_ENV=/etc/arena-hero-supervisor.env
 PYTHON_BIN=${PYTHON_BIN:-python3}
 WITH_SUPERVISOR=0
 WITH_OPTIMIZER=0
+DISABLE_SUPERVISOR=0
+DISABLE_AI=0
+DISABLE_OPTIMIZER=0
 START_SERVICES=1
 API_KEY_FILE=
 AI_ENV_FILE=
@@ -22,6 +25,9 @@ Options:
   --with-supervisor     Enable deterministic six-hour supervisor reports.
   --with-ai ENV_FILE    Enable supervisor reports and install explicit AI config.
   --with-optimizer      Enable the root optimizer timer (advanced, high privilege).
+  --without-supervisor  Disable the supervisor timer; preserve its private config.
+  --without-ai          Remove the private AI config; keep deterministic reports.
+  --without-optimizer   Disable the optimizer timer and stop an active run.
   --no-start            Install files without enabling or starting services.
   --python PATH         Python 3.11+ interpreter (default: python3).
   -h, --help            Show this help.
@@ -49,6 +55,18 @@ while [ "$#" -gt 0 ]; do
             WITH_OPTIMIZER=1
             shift
             ;;
+        --without-supervisor)
+            DISABLE_SUPERVISOR=1
+            shift
+            ;;
+        --without-ai)
+            DISABLE_AI=1
+            shift
+            ;;
+        --without-optimizer)
+            DISABLE_OPTIMIZER=1
+            shift
+            ;;
         --no-start)
             START_SERVICES=0
             shift
@@ -70,16 +88,49 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+if [ "$WITH_SUPERVISOR" -eq 1 ] && [ "$DISABLE_SUPERVISOR" -eq 1 ]; then
+    echo "--with-supervisor/--with-ai cannot be combined with --without-supervisor." >&2
+    exit 2
+fi
+if [ -n "$AI_ENV_FILE" ] && [ "$DISABLE_AI" -eq 1 ]; then
+    echo "--with-ai cannot be combined with --without-ai." >&2
+    exit 2
+fi
+if [ "$WITH_OPTIMIZER" -eq 1 ] && [ "$DISABLE_OPTIMIZER" -eq 1 ]; then
+    echo "--with-optimizer cannot be combined with --without-optimizer." >&2
+    exit 2
+fi
+
+require_command() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo "Required command is unavailable: $1" >&2
+        exit 2
+    fi
+}
+
+for command_name in cat chmod chown grep id install mktemp mv rm sed systemctl tr useradd; do
+    require_command "$command_name"
+done
+if [ "$WITH_SUPERVISOR" -eq 1 ]; then
+    require_command getent
+    require_command usermod
+fi
+require_command "$PYTHON_BIN"
+
 if [ "$(id -u)" -ne 0 ]; then
     echo "Run this installer as root (for example, with sudo)." >&2
     exit 2
 fi
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_ROOT=$(dirname "$SCRIPT_DIR")
 
 "$PYTHON_BIN" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' || {
     echo "Python 3.11 or newer is required." >&2
+    exit 2
+}
+"$PYTHON_BIN" -c 'import tempfile, venv; root = tempfile.TemporaryDirectory(); venv.EnvBuilder(with_pip=True).create(root.name)' || {
+    echo "Python venv with pip is required (for example, install python3-venv on Debian/Ubuntu)." >&2
     exit 2
 }
 
@@ -180,10 +231,24 @@ done
 
 systemctl daemon-reload
 
+if [ "$DISABLE_SUPERVISOR" -eq 1 ]; then
+    systemctl disable --now arena-hero-supervisor.timer || true
+    systemctl stop arena-hero-supervisor.service || true
+fi
+if [ "$DISABLE_AI" -eq 1 ]; then
+    systemctl stop arena-hero-supervisor.service || true
+    rm -f "$SUPERVISOR_ENV"
+fi
+if [ "$DISABLE_OPTIMIZER" -eq 1 ]; then
+    systemctl disable --now arena-hero-optimizer.timer || true
+    systemctl stop arena-hero-optimizer.service || true
+fi
+
 if [ "$START_SERVICES" -eq 1 ]; then
     systemctl enable --now arena-hero-version-monitor.timer
     systemctl start arena-hero-version-monitor.service
-    systemctl enable --now arena-hero-agent.service
+    systemctl enable arena-hero-agent.service
+    systemctl restart arena-hero-agent.service
     if [ "$WITH_SUPERVISOR" -eq 1 ]; then
         systemctl enable --now arena-hero-supervisor.timer
         systemctl start arena-hero-supervisor.service
@@ -201,4 +266,13 @@ if [ "$WITH_SUPERVISOR" -eq 0 ]; then
 fi
 if [ "$WITH_OPTIMIZER" -eq 0 ]; then
     echo "Root optimizer not enabled."
+fi
+if [ "$DISABLE_SUPERVISOR" -eq 1 ]; then
+    echo "Supervisor timer disabled."
+fi
+if [ "$DISABLE_AI" -eq 1 ]; then
+    echo "Private AI configuration removed."
+fi
+if [ "$DISABLE_OPTIMIZER" -eq 1 ]; then
+    echo "Root optimizer disabled."
 fi

@@ -2,6 +2,11 @@
 
 Contributions should preserve the Agent's deterministic Tick loop, Core-survival priority, and secret-free testability.
 
+For a rule-dependent strategy change, deployment architecture change, or new
+privileged process, open an issue before implementation so the compatibility
+and operational boundary can be agreed first. Small bug fixes and documentation
+corrections may go directly to a focused pull request.
+
 ## Setup
 
 ```bash
@@ -12,17 +17,24 @@ python -m unittest discover -v
 
 On Windows, `scripts/bootstrap.ps1` performs the same setup. On POSIX systems, use `sh scripts/bootstrap.sh`.
 
+Create a topic branch from the current `main` branch. Keep commits scoped and
+write commit messages that describe the behavior changed, not only the files.
+
 ## Before Opening a Pull Request
 
 Run:
 
 ```bash
 python -m unittest discover -v
-python -m compileall -q arena_farmer.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
+python -m compileall -q arena_farmer.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
 python scripts/check_secrets.py
 ```
 
 For deployment changes, also validate `docker build .`, `docker compose config`, shell syntax, and systemd units on Linux.
+
+Documentation-only changes may omit the Python test suite when they do not
+change commands or configuration, but must still run the credential scan and
+manually verify edited links and examples.
 
 ## Change Guidelines
 

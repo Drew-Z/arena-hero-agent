@@ -2,6 +2,10 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+[![CI](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/ci.yml)
+[![发布镜像](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/release.yml/badge.svg)](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/release.yml)
+[![许可证](https://img.shields.io/github/license/Drew-Z/arena-hero-agent)](LICENSE)
+
 这是一个面向 [Arena Hero](https://doc.arenahero.io/zh-Hans/) 的确定性、资源优先长期运行 Agent。项目使用官方 `arena-hero` Python SDK，可在本地、Docker 或 Linux systemd 环境运行。
 
 这是社区项目，并非 Arena Hero 官方产品。
@@ -25,6 +29,13 @@
 当前验证的协议是 API `v0.1`、玩法规则 `v0.13`、官方 Python SDK `0.2.8`。
 
 ## 最快开始
+
+先获取仓库并进入项目目录，再选择下面的部署方式：
+
+```bash
+git clone https://github.com/Drew-Z/arena-hero-agent.git
+cd arena-hero-agent
+```
 
 ### Windows 本地
 
@@ -101,12 +112,20 @@ sudo sh scripts/install-systemd.sh --with-optimizer
 
 首次公开提交前请按 [发布检查清单](docs/release-checklist.md) 检查凭据、日志和 Git 暂存区。
 
+## 文档与社区
+
+- [文档索引](docs/README.md)
+- [策略设计](docs/strategy.md)
+- [参与贡献](CONTRIBUTING.md)
+- [社区行为准则](CODE_OF_CONDUCT.md)
+- [安全策略](SECURITY.md)
+
 ## 开发与验证
 
 ```bash
 python -m pip install -e .
 python -m unittest discover -v
-python -m compileall -q arena_farmer.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
+python -m compileall -q arena_farmer.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
 python scripts/check_secrets.py
 ```
 

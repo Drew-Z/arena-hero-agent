@@ -2,6 +2,10 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+[![CI](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/ci.yml)
+[![Release image](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/release.yml/badge.svg)](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/release.yml)
+[![License](https://img.shields.io/github/license/Drew-Z/arena-hero-agent)](LICENSE)
+
 A deterministic, resource-first long-running agent for [Arena Hero](https://doc.arenahero.io/). It uses the official `arena-hero` Python SDK, keeps decisions inside the 15-second Tick window, and can run locally, in Docker, or as hardened systemd services.
 
 This is a community project and is not an official Arena Hero product.
@@ -37,6 +41,13 @@ flowchart LR
 The tested contract is API `v0.1`, gameplay `v0.13`, and official Python SDK `0.2.8`. The bundled version monitor fails closed when it detects an incompatible contract.
 
 ## Quick Start
+
+Clone the repository and enter its directory before choosing a deployment path:
+
+```bash
+git clone https://github.com/Drew-Z/arena-hero-agent.git
+cd arena-hero-agent
+```
 
 ### Windows
 
@@ -127,12 +138,20 @@ See [configuration](docs/configuration.md), [deployment](docs/deployment.md), an
 
 Before the first public commit, follow the [release checklist](docs/release-checklist.md).
 
+## Documentation and Community
+
+- [Documentation index](docs/README.md)
+- [Strategy design](docs/strategy.md)
+- [Contributing](CONTRIBUTING.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Security policy](SECURITY.md)
+
 ## Development
 
 ```bash
 python -m pip install -e .
 python -m unittest discover -v
-python -m compileall -q arena_farmer.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
+python -m compileall -q arena_farmer.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
 python scripts/check_secrets.py
 ```
 

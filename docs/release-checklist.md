@@ -43,4 +43,9 @@ On Linux, also run `systemd-analyze verify deploy/*.service deploy/*.timer` afte
 - Enable Dependabot security updates.
 - Confirm the Community Standards checklist sees `README`, `LICENSE`, `CONTRIBUTING`, `CODE_OF_CONDUCT`, `SECURITY`, and issue templates.
 - Set the default branch protection and require the CI workflow before merging.
+- Confirm tag releases call the reusable CI workflow before publishing an image.
 - Confirm the repository, documentation, issue, and source URLs in `pyproject.toml`.
+
+The release workflow rejects a tag that does not exactly match the version in
+`pyproject.toml`, waits for the complete reusable CI workflow, and publishes
+SBOM and provenance attestations alongside the image digest.

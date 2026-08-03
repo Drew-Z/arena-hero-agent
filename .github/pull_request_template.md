@@ -9,7 +9,7 @@ Describe the tactic, configuration, deployment, or documentation change.
 ## Validation
 
 - [ ] `python -m unittest discover -v`
-- [ ] `python -m compileall -q arena_farmer.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py`
+- [ ] `python -m compileall -q arena_farmer.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py`
 - [ ] `python scripts/check_secrets.py`
 - [ ] Deployment-specific checks completed when applicable
 
