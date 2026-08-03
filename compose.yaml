@@ -14,6 +14,19 @@ services:
       - no-new-privileges:true
     environment:
       ARENA_HERO_API_KEY_FILE: /run/secrets/arena_hero_api_key
+    healthcheck:
+      test:
+        - CMD
+        - arena-hero-health
+        - --heartbeat-only
+        - --heartbeat-file
+        - /tmp/arena-hero-heartbeat.json
+        - --max-heartbeat-age-seconds
+        - "180"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     secrets:
       - arena_hero_api_key
     command:
@@ -23,6 +36,8 @@ services:
       - --beacon-policy
       - "${ARENA_BEACON_POLICY:-retreat}"
       - --no-compatibility-marker
+      - --heartbeat-file
+      - /tmp/arena-hero-heartbeat.json
 
 secrets:
   arena_hero_api_key:

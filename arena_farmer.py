@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
+from arena_health import write_heartbeat
 from arena_hero import (
     APIError,
     ArenaHeroClient,
@@ -3475,6 +3476,7 @@ def play(
     worker_target: int,
     beacon_policy: str,
     compatibility_marker: Path | None = DEFAULT_COMPATIBILITY_MARKER,
+    heartbeat_file: Path | None = None,
 ) -> None:
     tactic = CoreFarmer(
         worker_target=worker_target,
@@ -3521,6 +3523,14 @@ def play(
                 "WATCHDOG=1",
                 _systemd_status(turn, tactic, accepted.tick),
             )
+            if heartbeat_file is not None:
+                write_heartbeat(
+                    heartbeat_file,
+                    tick=accepted.tick,
+                    resources=turn.resources,
+                    population=len(turn.units),
+                    core_alive=turn.core is not None,
+                )
             if _should_log_turn(turn):
                 actions, events = _turn_diagnostics(turn)
                 print(
@@ -3565,6 +3575,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="compatibility_marker",
         help="Disable compatibility-marker checks (useful outside systemd).",
     )
+    parser.add_argument(
+        "--heartbeat-file",
+        type=Path,
+        help="Atomically write liveness metadata after every accepted Turn.",
+    )
     return parser
 
 
@@ -3582,6 +3597,7 @@ def main(argv: list[str] | None = None) -> int:
             worker_target=args.worker_target,
             beacon_policy=args.beacon_policy,
             compatibility_marker=args.compatibility_marker,
+            heartbeat_file=args.heartbeat_file,
         )
     except KeyboardInterrupt:
         print("Arena Hero agent stopped.", file=sys.stderr)

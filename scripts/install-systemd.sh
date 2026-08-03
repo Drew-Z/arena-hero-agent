@@ -181,7 +181,9 @@ done
 systemctl daemon-reload
 
 if [ "$START_SERVICES" -eq 1 ]; then
-    systemctl enable --now arena-hero-agent.service arena-hero-version-monitor.timer
+    systemctl enable --now arena-hero-version-monitor.timer
+    systemctl start arena-hero-version-monitor.service
+    systemctl enable --now arena-hero-agent.service
     if [ "$WITH_SUPERVISOR" -eq 1 ]; then
         systemctl enable --now arena-hero-supervisor.timer
         systemctl start arena-hero-supervisor.service

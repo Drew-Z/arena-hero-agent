@@ -63,6 +63,13 @@ docker compose ps
 docker compose logs -f agent
 ```
 
+Compose reports the container healthy only after the Agent has submitted a recent
+Turn. Inspect the exact heartbeat check with `docker inspect` or run it directly:
+
+```bash
+docker compose exec agent arena-hero-health --heartbeat-only --heartbeat-file /tmp/arena-hero-heartbeat.json
+```
+
 Change the strategy without editing Compose:
 
 ```bash
@@ -97,6 +104,9 @@ This creates dedicated service users, installs the project into `/opt/arena-hero
 
 - `arena-hero-agent.service`
 - `arena-hero-version-monitor.timer`
+
+The installer runs the compatibility check once before starting the Agent. A
+failed or changed contract stops the installation before unattended play begins.
 
 The installer preserves an existing game credential and runtime tuning file during upgrades.
 
@@ -139,7 +149,12 @@ The optimizer runs as root, writes `/etc/arena-hero-agent/runtime.env`, and can 
 sudo systemctl status arena-hero-agent.service --no-pager
 sudo journalctl -fu arena-hero-agent.service -o short-iso-precise
 sudo systemctl list-timers 'arena-hero-*'
+sudo /opt/arena-hero-agent/.venv/bin/arena-hero-health --require-supervisor
 ```
+
+Omit `--require-supervisor` when the optional supervisor timer was not installed.
+The command exits nonzero when the service is down, the accepted-Turn heartbeat is
+stale, version compatibility is on hold, or a required report is stale/critical.
 
 Stop only the game Agent:
 

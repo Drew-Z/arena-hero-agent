@@ -8,7 +8,7 @@ WORKDIR /app
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin arena
 
 COPY pyproject.toml README.md LICENSE ./
-COPY arena_farmer.py arena_optimizer.py arena_supervisor.py arena_version_monitor.py ./
+COPY arena_farmer.py arena_health.py arena_optimizer.py arena_supervisor.py arena_version_monitor.py ./
 RUN python -m pip install --no-cache-dir .
 
 COPY docker/entrypoint.sh /usr/local/bin/arena-hero-entrypoint

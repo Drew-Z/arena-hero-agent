@@ -29,7 +29,7 @@ The last command must print nothing. Do not use `git add -f` for credential file
 
 ```bash
 python -m unittest discover -v
-python -m compileall -q arena_farmer.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
+python -m compileall -q arena_farmer.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
 python scripts/check_secrets.py
 docker compose config
 docker build --tag arena-hero-agent:release-candidate .
@@ -43,4 +43,4 @@ On Linux, also run `systemd-analyze verify deploy/*.service deploy/*.timer` afte
 - Enable Dependabot security updates.
 - Confirm the Community Standards checklist sees `README`, `LICENSE`, `CONTRIBUTING`, `CODE_OF_CONDUCT`, `SECURITY`, and issue templates.
 - Set the default branch protection and require the CI workflow before merging.
-- Add a repository URL to `pyproject.toml` after the final GitHub owner/name is known.
+- Confirm the repository, documentation, issue, and source URLs in `pyproject.toml`.

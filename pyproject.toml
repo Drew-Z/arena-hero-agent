@@ -25,11 +25,18 @@ classifiers = [
     "Private :: Do Not Upload",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Drew-Z/arena-hero-agent"
+Documentation = "https://github.com/Drew-Z/arena-hero-agent#readme"
+Issues = "https://github.com/Drew-Z/arena-hero-agent/issues"
+Source = "https://github.com/Drew-Z/arena-hero-agent"
+
 [project.scripts]
 arena-hero-agent = "arena_farmer:main"
 arena-hero-supervisor = "arena_supervisor:main"
 arena-hero-optimizer = "arena_optimizer:main"
 arena-hero-version-monitor = "arena_version_monitor:main"
+arena-hero-health = "arena_health:main"
 
 [tool.setuptools]
 py-modules = [
@@ -37,4 +44,5 @@ py-modules = [
     "arena_optimizer",
     "arena_supervisor",
     "arena_version_monitor",
+    "arena_health",
 ]
