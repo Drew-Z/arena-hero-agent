@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file. The format 
 - GitHub CI, community health files, and release documentation.
 - Accepted-Turn heartbeat and deterministic unattended health checks for systemd and Compose.
 - Deterministic resource-first tactic, structured diagnostics, compatibility monitor, read-only supervisor, and bounded runtime optimizer.
+- Tag-driven GHCR release images for build-free Compose deployment.
 
 ### Changed
 
