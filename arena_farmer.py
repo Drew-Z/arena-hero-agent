@@ -58,6 +58,7 @@ RANGER_GUARD_RADIUS = 2
 VANGUARD_CORE_GUARDS = 1
 RANGER_CORE_GUARDS = 1
 ISOLATED_CORE_CONFIRM_TICKS = 2
+CORE_VISIBILITY_GAP_TICKS = 2
 CORE_RAID_STRIKE_MAX_DISTANCE = 24
 CORE_RAID_MEMORY_TTL = 16
 CORE_OBSERVER_MIN_DISTANCE = 2
@@ -195,6 +196,7 @@ class EnemyCoreSighting:
     position: Position
     first_tick: int
     last_tick: int
+    observations: int = 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -1250,7 +1252,12 @@ class CoreFarmer:
             and self.core_observer_target_id not in visible_cores
             and self.core_observer_target_id != self.isolated_core_target_id
         ):
-            self._release_core_observer()
+            sighting = self.enemy_core_sightings.get(self.core_observer_target_id)
+            if (
+                sighting is None
+                or turn.tick - sighting.last_tick > CORE_VISIBILITY_GAP_TICKS
+            ):
+                self._release_core_observer()
         if any(
             enemy.unit_type in {UnitType.VANGUARD, UnitType.RANGER}
             for enemy in visible_units.values()
@@ -1346,27 +1353,37 @@ class CoreFarmer:
                 if self.isolated_core_target_id == core_id:
                     self._release_core_raid()
 
-        for core_id in set(self.enemy_core_sightings) - set(visible_cores):
-            self.enemy_core_sightings.pop(core_id, None)
+        for core_id, sighting in tuple(self.enemy_core_sightings.items()):
+            if (
+                core_id not in visible_cores
+                and turn.tick - sighting.last_tick > CORE_VISIBILITY_GAP_TICKS
+            ):
+                self.enemy_core_sightings.pop(core_id, None)
 
         for core_id, enemy_core in visible_cores.items():
             sighting = self.enemy_core_sightings.get(core_id)
             continuously_visible = (
                 sighting is not None
-                and sighting.last_tick == turn.tick - 1
                 and sighting.position == enemy_core.position
                 and enemy_core.state is CoreState.NORMAL
+                and turn.tick - sighting.last_tick - 1 <= CORE_VISIBILITY_GAP_TICKS
             )
             if continuously_visible:
                 sighting.last_tick = turn.tick
+                sighting.observations += 1
             else:
                 self.enemy_core_sightings[core_id] = EnemyCoreSighting(
                     position=enemy_core.position,
                     first_tick=turn.tick,
                     last_tick=turn.tick,
+                    observations=1,
                 )
                 if (
                     enemy_core.state is not CoreState.NORMAL
+                    or (
+                        sighting is not None
+                        and sighting.position != enemy_core.position
+                    )
                     or (
                         core_id in self.stationary_core_memory
                         and self.stationary_core_memory[core_id].position
@@ -1392,13 +1409,14 @@ class CoreFarmer:
             current_sighting = self.enemy_core_sightings[core_id]
             if (
                 enemy_core.state is CoreState.NORMAL
-                and turn.tick - current_sighting.first_tick
-                >= ISOLATED_CORE_CONFIRM_TICKS
+                and current_sighting.observations
+                >= ISOLATED_CORE_CONFIRM_TICKS + 1
             ):
                 self.stationary_core_memory[core_id] = EnemyCoreSighting(
                     position=enemy_core.position,
                     first_tick=current_sighting.first_tick,
                     last_tick=turn.tick,
+                    observations=current_sighting.observations,
                 )
 
     def _select_isolated_core_target(self, turn: Turn) -> CoreRaidTarget | None:
@@ -1490,7 +1508,7 @@ class CoreFarmer:
                 and remembered.position == enemy_core.position
             )
             if (
-                turn.tick - sighting.first_tick < ISOLATED_CORE_CONFIRM_TICKS
+                sighting.observations < ISOLATED_CORE_CONFIRM_TICKS + 1
                 and not confirmed_at_same_position
             ):
                 continue
@@ -2027,7 +2045,7 @@ class CoreFarmer:
         )
         if (
             sighting is None
-            or turn.tick - sighting.first_tick >= ISOLATED_CORE_CONFIRM_TICKS
+            or sighting.observations >= ISOLATED_CORE_CONFIRM_TICKS + 1
         ):
             self._release_core_observer()
             return None
@@ -3342,6 +3360,18 @@ def _position_diagnostics(turn: Turn, tactic: CoreFarmer) -> str:
         if event.event_type == "UNIT_HEAL_SUCCEEDED"
         and (healing := event.healing) is not None
     )
+    upkeep_events = tuple(
+        event for event in turn.events if event.event_type == "UPKEEP_PAID"
+    )
+    upkeep_due = sum(_event_int(event, "due") for event in upkeep_events)
+    upkeep_paid = sum(_event_int(event, "paid") for event in upkeep_events)
+    upkeep_deficit = sum(_event_int(event, "deficit") for event in upkeep_events)
+    upkeep_damage = sum(
+        _event_int(event, "damage")
+        for event in turn.events
+        if event.event_type == "UNIT_DAMAGED"
+        and event.reason_code == "UPKEEP_DEFICIT"
+    )
     enemy_counts = _visible_enemy_counts(turn)
     core_action = plan.get("core_action", {})
     core_action_name = core_action.get("type", "NONE")
@@ -3374,6 +3404,10 @@ def _position_diagnostics(turn: Turn, tactic: CoreFarmer) -> str:
         f"capture_destroyed={capture_destroyed} "
         f"core_healed={core_healed} "
         f"unit_healed={unit_healed} "
+        f"upkeep_due={upkeep_due} "
+        f"upkeep_paid={upkeep_paid} "
+        f"upkeep_deficit={upkeep_deficit} "
+        f"upkeep_damage={upkeep_damage} "
         f"visible_enemies={len(turn.visible_enemies)} "
         f"enemy_types={_format_counts(enemy_counts)} "
         f"stationary_core_memory={len(tactic.stationary_core_memory)} "

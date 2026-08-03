@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Added
+
+- Tolerant stationary-Core confirmation across short visibility gaps, while still requiring three real same-position observations before a raid.
+- Structured v0.11 upkeep due/paid/deficit and excess-Unit damage diagnostics with deterministic supervisor and optional model-review triggers.
+
 ## [0.1.0] - 2026-08-03
 
 ### Added

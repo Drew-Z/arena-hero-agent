@@ -170,7 +170,8 @@ class SupervisorTests(unittest.TestCase):
                     "beacon_distance=200 known_resources=4 danger_cells=1 "
                     "combat_pressure=1 resource_blocked=12 scout_chunks=7 "
                     "scout_oldest_age=31 projected_core_damage=2 "
-                    "core_survival_margin=3 "
+                    "core_survival_margin=3 upkeep_due=1 upkeep_paid=1 "
+                    "upkeep_deficit=0 upkeep_damage=0 "
                     "phase=STOCKPILE core_hp=5 core_shield=4"
                 ),
                 "WARNING tick=33447 manual_override unit_actions=1 core_actions=0",
@@ -201,6 +202,12 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(metrics.latest_core_survival_margin, 3)
         self.assertEqual(metrics.min_core_survival_margin, 3)
         self.assertEqual(metrics.critical_core_margin_samples, 0)
+        self.assertEqual(metrics.latest_upkeep_due, 1)
+        self.assertEqual(metrics.latest_upkeep_paid, 1)
+        self.assertEqual(metrics.latest_upkeep_deficit, 0)
+        self.assertEqual(metrics.latest_upkeep_damage, 0)
+        self.assertEqual(metrics.upkeep_deficit_samples, 0)
+        self.assertEqual(metrics.upkeep_damage_samples, 0)
         self.assertEqual(metrics.last_harvest_tick, 33446)
         self.assertEqual(metrics.ticks_since_harvest, 0)
         self.assertEqual(metrics.action_counts, {"HARVEST": 2, "MOVE": 6})
@@ -408,6 +415,47 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(assessment.status, "watch")
         self.assertTrue(assessment.requires_human)
         self.assertIn("unexplained_resource_loss", reasons)
+
+    def test_upkeep_deficit_triggers_watch_and_model_review(self) -> None:
+        snapshot = JournalSnapshot(
+            "tick=101 accepted=True resources=0/100 workers=12 "
+            "vanguards=4 rangers=4 events=UNIT_DAMAGED/UPKEEP_DEFICIT:1,UPKEEP_PAID:1 "
+            "upkeep_due=1 upkeep_paid=0 upkeep_deficit=1 upkeep_damage=1",
+            180,
+            False,
+        )
+        metrics = extract_metrics(snapshot.text)
+
+        assessment = assess_deterministic(snapshot, metrics, {"hold": False})
+        reasons = llm_trigger_reasons(snapshot, metrics, {"hold": False})
+
+        self.assertEqual(metrics.upkeep_deficit_samples, 1)
+        self.assertEqual(metrics.upkeep_deficit_total, 1)
+        self.assertEqual(metrics.upkeep_damage_samples, 1)
+        self.assertEqual(metrics.upkeep_damage_total, 1)
+        self.assertEqual(assessment.status, "watch")
+        self.assertTrue(assessment.requires_human)
+        self.assertIn("upkeep_deficit", reasons)
+        self.assertIn("upkeep_unit_damage", reasons)
+
+    def test_fully_paid_upkeep_does_not_trigger_review(self) -> None:
+        snapshot = JournalSnapshot(
+            "tick=101 accepted=True resources=9/100 workers=12 "
+            "vanguards=4 rangers=4 events=UPKEEP_PAID:1 "
+            "upkeep_due=1 upkeep_paid=1 upkeep_deficit=0 upkeep_damage=0",
+            150,
+            False,
+        )
+        metrics = extract_metrics(snapshot.text)
+
+        assessment = assess_deterministic(snapshot, metrics, {"hold": False})
+        reasons = llm_trigger_reasons(snapshot, metrics, {"hold": False})
+
+        self.assertEqual(metrics.upkeep_deficit_samples, 0)
+        self.assertEqual(metrics.upkeep_damage_samples, 0)
+        self.assertEqual(assessment.status, "healthy")
+        self.assertFalse(assessment.requires_human)
+        self.assertEqual(reasons, ())
 
     def test_critical_projected_core_margin_triggers_model_review(self) -> None:
         metrics = Metrics(

@@ -1925,6 +1925,75 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertEqual(queued["unit_actions"][VANGUARD_2]["type"], "SWEEP")
         self.assertEqual(queued["unit_actions"][RANGER_2]["type"], "SHOOT")
 
+    def test_core_confirmation_bridges_intermittent_visibility(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        units = [
+            unit(WORKER_1, "WORKER", (2, 0), cargo=0),
+            unit(VANGUARD_1, "VANGUARD", (0, 3)),
+            unit(VANGUARD_2, "VANGUARD", (3, 0)),
+            unit(RANGER_1, "RANGER", (-2, 0)),
+            unit(RANGER_2, "RANGER", (2, 2)),
+        ]
+        for tick in (100, 101, 102, 103, 104):
+            enemies = [enemy_core(ENEMY_1, (4, 0))] if tick in {100, 102, 104} else []
+            turn = make_turn(
+                tick=tick,
+                resources=5,
+                units=units,
+                enemies=enemies,
+            )
+            tactic.choose_actions(turn)
+
+        sighting = tactic.enemy_core_sightings[UUID(ENEMY_1)]
+        self.assertEqual(sighting.observations, 3)
+        self.assertEqual(tactic.stationary_core_memory[UUID(ENEMY_1)].observations, 3)
+        self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
+        self.assertEqual(tactic.core_raid_spotter_id, UUID(WORKER_1))
+
+    def test_core_confirmation_resets_after_visibility_gap_expires(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        defenders = [
+            unit(VANGUARD_1, "VANGUARD", (0, 3)),
+            unit(VANGUARD_2, "VANGUARD", (3, 0)),
+            unit(RANGER_1, "RANGER", (-2, 0)),
+            unit(RANGER_2, "RANGER", (2, 2)),
+        ]
+        for tick in (100, 101, 102, 103, 104):
+            enemies = [enemy_core(ENEMY_1, (4, 0))] if tick in {100, 104} else []
+            turn = make_turn(
+                tick=tick,
+                resources=5,
+                units=defenders,
+                enemies=enemies,
+            )
+            tactic.choose_actions(turn)
+
+        self.assertEqual(tactic.enemy_core_sightings[UUID(ENEMY_1)].observations, 1)
+        self.assertNotIn(UUID(ENEMY_1), tactic.stationary_core_memory)
+        self.assertIsNone(tactic.isolated_core_target_id)
+
+    def test_core_confirmation_resets_when_position_changes(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        defenders = [
+            unit(VANGUARD_1, "VANGUARD", (0, 3)),
+            unit(VANGUARD_2, "VANGUARD", (3, 0)),
+            unit(RANGER_1, "RANGER", (-2, 0)),
+            unit(RANGER_2, "RANGER", (2, 2)),
+        ]
+        for tick, position in ((100, (4, 0)), (101, None), (102, (5, 0))):
+            turn = make_turn(
+                tick=tick,
+                resources=5,
+                units=defenders,
+                enemies=[] if position is None else [enemy_core(ENEMY_1, position)],
+            )
+            tactic.choose_actions(turn)
+
+        sighting = tactic.enemy_core_sightings[UUID(ENEMY_1)]
+        self.assertEqual(sighting.position, (5, 0))
+        self.assertEqual(sighting.observations, 1)
+        self.assertNotIn(UUID(ENEMY_1), tactic.stationary_core_memory)
+
     def test_newly_exposing_worker_becomes_stationary_core_observer(self) -> None:
         tactic = CoreFarmer(worker_target=2, beacon_policy="hold")
         tactic.worker_history[UUID(WORKER_1)] = deque([(20, 0)])
@@ -2384,6 +2453,19 @@ class CoreFarmerTests(unittest.TestCase):
                     "event_type": "CORE_HEAL_SUCCEEDED",
                     "values": {"amount": 2, "hp": 5, "cost": 2},
                 },
+                {
+                    "event_id": "20000000-0000-4000-8000-000000000022",
+                    "tick": 8,
+                    "event_type": "UPKEEP_PAID",
+                    "values": {"due": 1, "paid": 0, "deficit": 1},
+                },
+                {
+                    "event_id": "20000000-0000-4000-8000-000000000023",
+                    "tick": 8,
+                    "event_type": "UNIT_DAMAGED",
+                    "reason_code": "UPKEEP_DEFICIT",
+                    "values": {"damage": 1, "hp": 1},
+                },
             ],
         )
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
@@ -2393,6 +2475,10 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertIn("captured_resources=7", diagnostics)
         self.assertIn("capture_destroyed=2", diagnostics)
         self.assertIn("core_healed=2", diagnostics)
+        self.assertIn("upkeep_due=1", diagnostics)
+        self.assertIn("upkeep_paid=0", diagnostics)
+        self.assertIn("upkeep_deficit=1", diagnostics)
+        self.assertIn("upkeep_damage=1", diagnostics)
         self.assertIn("projected_core_damage=0", diagnostics)
         self.assertIn("core_survival_margin=5", diagnostics)
 
