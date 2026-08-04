@@ -130,11 +130,12 @@ layout:
 └── previous -> releases/<rollback-release>
 ```
 
-Every install creates a fresh staging virtual environment, installs both
-hash-locked dependency sets, runs `pip check` and all CLI self-checks, then
-renames the staging directory into an immutable release. Only after those steps
-succeed does one atomic symlink replacement activate `current`. The installer
-then enables:
+Every install creates a fresh inactive release at its final versioned path,
+installs both hash-locked dependency sets, and runs `pip check` plus all CLI
+self-checks. Building the virtual environment at its final path preserves the
+absolute interpreter paths embedded in its console scripts. A pre-activation
+failure removes the incomplete release. Only after all checks succeed does an
+atomic symlink replacement activate `current`. The installer then enables:
 
 - `arena-hero-agent.service`
 - `arena-hero-version-monitor.timer`

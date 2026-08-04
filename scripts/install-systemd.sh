@@ -25,7 +25,7 @@ DISABLE_OPTIMIZER=0
 START_SERVICES=1
 API_KEY_FILE=
 AI_ENV_FILE=
-STAGING_DIR=
+BUILD_DIR=
 TEMP_LINK=
 TEMP_TRANSACTION=
 TEMP_UNIT=
@@ -216,8 +216,8 @@ cleanup() {
     if [ -n "$TEMP_ROLLBACK" ]; then
         rm -f "$TEMP_ROLLBACK"
     fi
-    if [ -n "$STAGING_DIR" ] && [ -d "$STAGING_DIR" ]; then
-        rm -rf "$STAGING_DIR"
+    if [ -n "$BUILD_DIR" ] && [ -d "$BUILD_DIR" ]; then
+        rm -rf "$BUILD_DIR"
     fi
 }
 trap cleanup EXIT
@@ -416,21 +416,21 @@ case "$PROJECT_VERSION" in
 esac
 RELEASE_ID=$PROJECT_VERSION-$(date -u +%Y%m%dT%H%M%SZ)-$$
 FINAL_RELEASE=$RELEASES_DIR/$RELEASE_ID
-STAGING_DIR=$RELEASES_DIR/.staging-$RELEASE_ID
-if [ -e "$FINAL_RELEASE" ] || [ -e "$STAGING_DIR" ]; then
+BUILD_DIR=$FINAL_RELEASE
+if [ -e "$BUILD_DIR" ]; then
     echo "Release path already exists: $FINAL_RELEASE" >&2
     exit 1
 fi
 
-install -d -o root -g root -m 0755 "$STAGING_DIR"
-"$PYTHON_BIN" -m venv "$STAGING_DIR/.venv"
-"$STAGING_DIR/.venv/bin/python" -m pip install --require-hashes \
+install -d -o root -g root -m 0755 "$BUILD_DIR"
+"$PYTHON_BIN" -m venv "$BUILD_DIR/.venv"
+"$BUILD_DIR/.venv/bin/python" -m pip install --require-hashes \
     -r "$PROJECT_ROOT/requirements-build.lock"
-"$STAGING_DIR/.venv/bin/python" -m pip install --require-hashes \
+"$BUILD_DIR/.venv/bin/python" -m pip install --require-hashes \
     -r "$PROJECT_ROOT/requirements.lock"
-"$STAGING_DIR/.venv/bin/python" -m pip install --no-deps \
+"$BUILD_DIR/.venv/bin/python" -m pip install --no-deps \
     --no-build-isolation "$PROJECT_ROOT"
-"$STAGING_DIR/.venv/bin/python" -m pip check
+"$BUILD_DIR/.venv/bin/python" -m pip check
 for command_name in \
     arena-hero-agent \
     arena-hero-health \
@@ -438,11 +438,11 @@ for command_name in \
     arena-hero-supervisor \
     arena-hero-version-monitor
 do
-    "$STAGING_DIR/.venv/bin/$command_name" --help >/dev/null
+    "$BUILD_DIR/.venv/bin/$command_name" --help >/dev/null
 done
-printf '%s\n' "$RELEASE_ID" > "$STAGING_DIR/release-id"
-printf '%s\n' "$PROJECT_VERSION" > "$STAGING_DIR/source-version"
-chmod -R go-w "$STAGING_DIR"
+printf '%s\n' "$RELEASE_ID" > "$BUILD_DIR/release-id"
+printf '%s\n' "$PROJECT_VERSION" > "$BUILD_DIR/source-version"
+chmod -R go-w "$BUILD_DIR"
 
 install -d -o root -g arena-hero -m 0750 "$RUNTIME_DIR"
 if [ ! -e "$RUNTIME_ENV" ]; then
@@ -583,8 +583,7 @@ if [ "$START_SERVICES" -eq 1 ]; then
 fi
 SERVICE_STATE_CAPTURED=1
 
-mv "$STAGING_DIR" "$FINAL_RELEASE"
-STAGING_DIR=
+BUILD_DIR=
 
 wait_for_health() {
     attempt=1

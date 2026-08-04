@@ -90,18 +90,23 @@ if [ "${1:-}" = "-m" ] && [ "${2:-}" = "pip" ]; then
         *" --no-build-isolation "*)
             bin_dir=$(dirname "$0")
             for command_name in arena-hero-agent arena-hero-health arena-hero-optimizer arena-hero-supervisor arena-hero-version-monitor; do
-                cat > "$bin_dir/$command_name" <<'EOF'
-#!/bin/sh
+                {
+                    printf '#!%s\n' "$bin_dir/python"
+                    cat <<'EOF'
 if [ "$(basename "$0")" = "arena-hero-health" ] && [ "$#" -eq 0 ] && [ "${FAKE_HEALTH_FAIL:-0}" = "1" ]; then
     exit 1
 fi
 exit 0
 EOF
+                } > "$bin_dir/$command_name"
                 chmod 0755 "$bin_dir/$command_name"
             done
             ;;
     esac
     exit 0
+fi
+if [ -f "${1:-}" ]; then
+    exec /bin/sh "$@"
 fi
 exit 0
 '''
@@ -221,6 +226,24 @@ os.execv("/usr/bin/install", ["install", *args])
         self.assertNotIn("ExecStart=/opt/arena-hero-agent", agent_unit)
         installed_rollback = self.rollback_bin.read_text(encoding="utf-8")
         self.assertIn(f"ARENA_INSTALL_ROOT:-{self.install_root}", installed_rollback)
+
+    def test_release_console_scripts_keep_valid_venv_shebangs(self) -> None:
+        result = self._install("--no-start")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        release = self._resolved("current")
+        command = release / ".venv" / "bin" / "arena-hero-agent"
+        shebang = command.read_text(encoding="utf-8").splitlines()[0]
+        self.assertEqual(shebang, f"#!{release}/.venv/bin/python")
+
+        probe = subprocess.run(
+            [str(command), "--help"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(probe.returncode, 0, probe.stderr)
 
     def test_build_failure_leaves_active_links_unchanged(self) -> None:
         self.assertEqual(self._install("--no-start").returncode, 0)
