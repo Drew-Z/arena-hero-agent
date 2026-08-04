@@ -7,10 +7,10 @@ Wants=arena-hero-agent.service
 Type=oneshot
 User=root
 Group=root
-WorkingDirectory=/opt/arena-hero-agent
+WorkingDirectory=/opt/arena-hero-agent/current
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/arena-hero-agent/.venv/bin/arena-hero-optimizer --compatibility-marker /var/lib/arena-hero-version/compatibility-hold.json
+ExecStart=/opt/arena-hero-agent/current/.venv/bin/arena-hero-optimizer --compatibility-marker /var/lib/arena-hero-version/compatibility-hold.json
 TimeoutStartSec=3min
 UMask=0077
 

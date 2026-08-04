@@ -15,6 +15,12 @@ if [ ! -d "$PROJECT_ROOT/.venv" ]; then
 fi
 
 "$PROJECT_ROOT/.venv/bin/python" -m pip install --upgrade pip
-"$PROJECT_ROOT/.venv/bin/python" -m pip install --editable "$PROJECT_ROOT"
+"$PROJECT_ROOT/.venv/bin/python" -m pip install --require-hashes \
+    -r "$PROJECT_ROOT/requirements-build.lock"
+"$PROJECT_ROOT/.venv/bin/python" -m pip install --require-hashes \
+    -r "$PROJECT_ROOT/requirements.lock"
+"$PROJECT_ROOT/.venv/bin/python" -m pip install --no-deps \
+    --no-build-isolation --editable "$PROJECT_ROOT"
+"$PROJECT_ROOT/.venv/bin/python" -m pip check
 
 echo "Environment ready. Start with ./scripts/run-agent.sh."

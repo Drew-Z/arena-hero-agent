@@ -29,13 +29,25 @@ The last command must print nothing. Do not use `git add -f` for credential file
 
 ```bash
 python -m unittest discover -v
+python -m pip install --require-hashes -r requirements-build.lock
+python -m pip install --require-hashes -r requirements.lock
+python -m pip check
 python -m compileall -q arena_farmer.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
 python scripts/check_secrets.py
 docker compose config
 docker build --tag arena-hero-agent:release-candidate .
 ```
 
-On Linux, also run `systemd-analyze verify deploy/*.service deploy/*.timer` after installing the expected service users and executable paths. The Windows development environment cannot run this check.
+Regenerate both lock files from their checked-in input and `pyproject.toml`
+using the exact `uv pip compile` commands in the generated headers. A release
+must not contain an unreviewed lock-file diff.
+
+On Linux, also run `python -m unittest -v test_systemd_deploy` and
+`systemd-analyze verify deploy/*.service deploy/*.timer` after installing the
+expected service users and `current/.venv/bin` executable paths. The transaction
+test covers install, upgrade, rollback, failure restoration, path validation,
+legacy migration, and deployment locking. The Windows development environment
+skips these Linux-specific checks.
 
 ## GitHub Settings
 

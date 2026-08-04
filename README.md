@@ -95,7 +95,12 @@ sudo sh scripts/install-systemd.sh
 sudo journalctl -fu arena-hero-agent.service -o short-iso-precise
 ```
 
-The installer prompts for the Arena Hero key without echoing it, installs into `/opt/arena-hero-agent`, and enables the main Agent plus the six-hour compatibility monitor.
+The installer prompts for the Arena Hero key without echoing it, builds an
+immutable release under `/opt/arena-hero-agent/releases`, atomically updates the
+`current` symlink, and enables the main Agent plus the six-hour compatibility
+monitor. A failed compatibility, restart, or health check restores the prior
+release. After a successful upgrade, use `sudo arena-hero-rollback` for an
+immediate version swap.
 
 Optional components are explicit:
 
@@ -149,13 +154,18 @@ Before the first public commit, follow the [release checklist](docs/release-chec
 ## Development
 
 ```bash
-python -m pip install -e .
+python -m pip install --require-hashes -r requirements-build.lock
+python -m pip install --require-hashes -r requirements.lock
+python -m pip install --no-deps --no-build-isolation -e .
 python -m unittest discover -v
 python -m compileall -q arena_farmer.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
 python scripts/check_secrets.py
 ```
 
 Tests use synthetic UUIDs and do not need an API key or a live game connection. CI runs on Windows and Linux and also validates the container build.
+
+Regenerate the lock files with the exact `uv pip compile` commands recorded in
+their headers, then review and test the resulting dependency diff before commit.
 
 ## Security
 

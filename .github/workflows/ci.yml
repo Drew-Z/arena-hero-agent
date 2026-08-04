@@ -21,13 +21,20 @@ jobs:
         os: [ubuntu-latest, windows-latest]
         python-version: ["3.11", "3.13"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+          cache-dependency-path: |
+            requirements-build.lock
+            requirements.lock
       - name: Install
-        run: python -m pip install --editable .
+        run: |
+          python -m pip install --require-hashes -r requirements-build.lock
+          python -m pip install --require-hashes -r requirements.lock
+          python -m pip install --no-deps --no-build-isolation --editable .
+          python -m pip check
       - name: Compile
         run: python -m compileall -q arena_farmer.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
       - name: Test
@@ -44,20 +51,27 @@ jobs:
     name: Public surface and deployment
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements-build.lock
+            requirements.lock
       - name: Scan tracked files for credentials
         run: python scripts/check_secrets.py
       - name: Validate shell scripts
         run: |
-          sh -n docker/entrypoint.sh scripts/bootstrap.sh scripts/run-agent.sh scripts/install-systemd.sh
+          sh -n docker/entrypoint.sh scripts/bootstrap.sh scripts/run-agent.sh scripts/install-systemd.sh scripts/rollback-systemd.sh
           sh scripts/install-systemd.sh --help >/dev/null
+          sh scripts/rollback-systemd.sh --help >/dev/null
           if sh scripts/install-systemd.sh --with-supervisor --without-supervisor 2>/dev/null; then
             echo "conflicting installer flags unexpectedly succeeded" >&2
             exit 1
           fi
+      - name: Simulate versioned systemd deployment and rollback
+        run: python -m unittest -v test_systemd_deploy
       - name: Validate PowerShell scripts
         shell: pwsh
         run: |
@@ -87,9 +101,10 @@ jobs:
           sudo install -m 0640 /dev/null /etc/arena-hero-agent.env
           sudo install -m 0640 /dev/null /etc/arena-hero-agent/runtime.env
           sudo install -m 0640 /dev/null /etc/arena-hero-supervisor.env
-          sudo install -d /opt/arena-hero-agent/.venv/bin
+          sudo install -d /opt/arena-hero-agent/releases/ci/.venv/bin
+          sudo ln -s releases/ci /opt/arena-hero-agent/current
           for command in arena-hero-agent arena-hero-supervisor arena-hero-optimizer arena-hero-version-monitor; do
-            sudo touch "/opt/arena-hero-agent/.venv/bin/$command"
-            sudo chmod 0755 "/opt/arena-hero-agent/.venv/bin/$command"
+            sudo touch "/opt/arena-hero-agent/current/.venv/bin/$command"
+            sudo chmod 0755 "/opt/arena-hero-agent/current/.venv/bin/$command"
           done
           systemd-analyze verify deploy/*.service deploy/*.timer

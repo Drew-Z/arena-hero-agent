@@ -83,7 +83,10 @@ sudo sh scripts/install-systemd.sh
 sudo journalctl -fu arena-hero-agent.service -o short-iso-precise
 ```
 
-安装器会隐藏输入 API key，将程序安装到 `/opt/arena-hero-agent`，默认只启用主 Agent 和每六小时一次的版本兼容监控。
+安装器会隐藏输入 API key，在 `/opt/arena-hero-agent/releases` 下构建不可变
+版本并原子切换 `current` 链接，默认只启用主 Agent 和每六小时一次的版本兼容
+监控。兼容检查、重启或健康检查失败时会自动恢复旧版本；升级成功后可执行
+`sudo arena-hero-rollback` 立即切换回上一版本。
 
 其余组件必须显式开启：
 
@@ -123,13 +126,18 @@ sudo sh scripts/install-systemd.sh --with-optimizer
 ## 开发与验证
 
 ```bash
-python -m pip install -e .
+python -m pip install --require-hashes -r requirements-build.lock
+python -m pip install --require-hashes -r requirements.lock
+python -m pip install --no-deps --no-build-isolation -e .
 python -m unittest discover -v
 python -m compileall -q arena_farmer.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
 python scripts/check_secrets.py
 ```
 
 测试全部使用构造数据，不需要真实 API key，也不会连接线上游戏。
+
+更新依赖时，使用锁文件头部记录的完整 `uv pip compile` 命令重新生成，
+审查依赖差异并完成测试后再提交。
 
 ## 安全
 

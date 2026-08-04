@@ -9,7 +9,7 @@ StartLimitBurst=10
 Type=simple
 User=arena-hero
 Group=arena-hero
-WorkingDirectory=/opt/arena-hero-agent
+WorkingDirectory=/opt/arena-hero-agent/current
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
 Environment=ARENA_WORKER_TARGET=12
@@ -19,7 +19,7 @@ EnvironmentFile=/etc/arena-hero-agent.env
 EnvironmentFile=-/etc/arena-hero-agent/runtime.env
 RuntimeDirectory=arena-hero-agent
 RuntimeDirectoryMode=0750
-ExecStart=/opt/arena-hero-agent/.venv/bin/arena-hero-agent --env-file /etc/arena-hero-agent.env --worker-target ${ARENA_WORKER_TARGET} --beacon-policy ${ARENA_BEACON_POLICY} --heartbeat-file /run/arena-hero-agent/heartbeat.json
+ExecStart=/opt/arena-hero-agent/current/.venv/bin/arena-hero-agent --env-file /etc/arena-hero-agent.env --worker-target ${ARENA_WORKER_TARGET} --beacon-policy ${ARENA_BEACON_POLICY} --heartbeat-file /run/arena-hero-agent/heartbeat.json
 Restart=on-failure
 RestartPreventExitStatus=2 10 11 12 13 14 130
 RestartForceExitStatus=75

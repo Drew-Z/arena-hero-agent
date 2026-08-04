@@ -11,7 +11,9 @@ corrections may go directly to a focused pull request.
 
 ```bash
 python -m venv .venv
-python -m pip install -e .
+python -m pip install --require-hashes -r requirements-build.lock
+python -m pip install --require-hashes -r requirements.lock
+python -m pip install --no-deps --no-build-isolation -e .
 python -m unittest discover -v
 ```
 
@@ -30,7 +32,9 @@ python -m compileall -q arena_farmer.py arena_health.py arena_supervisor.py aren
 python scripts/check_secrets.py
 ```
 
-For deployment changes, also validate `docker build .`, `docker compose config`, shell syntax, and systemd units on Linux.
+For deployment changes, also validate `docker build .`, `docker compose config`,
+shell syntax, `python -m unittest -v test_systemd_deploy`, and systemd units on
+Linux.
 
 Documentation-only changes may omit the Python test suite when they do not
 change commands or configuration, but must still run the credential scan and

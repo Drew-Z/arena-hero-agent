@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- Hash-locked runtime and build dependency sets shared by local bootstrap, CI, Docker, and systemd installation.
+- Versioned systemd releases with atomic `current` activation, interruption journaling, service-state restoration, and a standalone rollback command.
 - Public documentation navigation, executable clone-first quick starts, compatibility fields in bug reports, and clearer community reporting guidance.
 - Release tags now pass the complete reusable CI workflow before publishing, with version validation, SBOM, provenance, and image-digest reporting.
 - Tolerant stationary-Core confirmation across short visibility gaps, while still requiring three real same-position observations before a raid.
@@ -15,6 +17,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Changed
 
+- The Docker base image is pinned to an immutable multi-architecture digest.
+- GitHub Actions are pinned to full commit SHAs while retaining their reviewed major-version annotations.
 - systemd upgrades now preflight host requirements, restart the Agent after compatibility validation, and support explicit supervisor, AI, and optimizer disable paths.
 - Docker Compose now uses the same graceful `SIGINT` shutdown contract as systemd.
 - Resource targets now use deterministic minimum-cost Worker matching with limited intent stickiness instead of preserving a worse assignment indefinitely.

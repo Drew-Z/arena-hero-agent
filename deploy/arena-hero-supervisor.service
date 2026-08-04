@@ -8,12 +8,12 @@ Type=oneshot
 User=arena-hero-supervisor
 Group=arena-hero-supervisor
 SupplementaryGroups=systemd-journal
-WorkingDirectory=/opt/arena-hero-agent
+WorkingDirectory=/opt/arena-hero-agent/current
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
 Environment=ARENA_SUPERVISOR_AI_ENABLED=false
 EnvironmentFile=-/etc/arena-hero-supervisor.env
-ExecStart=/opt/arena-hero-agent/.venv/bin/arena-hero-supervisor --compatibility-marker /var/lib/arena-hero-version/compatibility-hold.json
+ExecStart=/opt/arena-hero-agent/current/.venv/bin/arena-hero-supervisor --compatibility-marker /var/lib/arena-hero-version/compatibility-hold.json
 TimeoutStartSec=5min
 UMask=0077
 

@@ -44,9 +44,21 @@ if (-not $NoUpgradePip) {
         throw "Failed to upgrade pip."
     }
 }
-& $venvPython -m pip install --editable $projectRoot
+& $venvPython -m pip install --require-hashes -r (Join-Path $projectRoot "requirements-build.lock")
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to install locked build dependencies."
+}
+& $venvPython -m pip install --require-hashes -r (Join-Path $projectRoot "requirements.lock")
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to install locked runtime dependencies."
+}
+& $venvPython -m pip install --no-deps --no-build-isolation --editable $projectRoot
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to install arena-hero-agent."
+}
+& $venvPython -m pip check
+if ($LASTEXITCODE -ne 0) {
+    throw "The installed dependency set is inconsistent."
 }
 
 Write-Host "Environment ready. Start with .\start_agent.ps1 or .\start_agent.cmd."

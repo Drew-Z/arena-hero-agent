@@ -7,10 +7,10 @@ Wants=network-online.target
 Type=oneshot
 User=arena-hero-version
 Group=arena-hero-version
-WorkingDirectory=/opt/arena-hero-agent
+WorkingDirectory=/opt/arena-hero-agent/current
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/arena-hero-agent/.venv/bin/arena-hero-version-monitor
+ExecStart=/opt/arena-hero-agent/current/.venv/bin/arena-hero-version-monitor
 TimeoutStartSec=90s
 UMask=0022
 

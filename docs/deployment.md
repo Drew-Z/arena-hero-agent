@@ -99,14 +99,14 @@ ARENA_HERO_AGENT_IMAGE=ghcr.io/drew-z/arena-hero-agent:0.1.0 docker compose up -
 
 ## Linux systemd Server
 
-The installer targets standard systemd distributions and requires root,
-systemd, Python 3.11+, Python `venv` support, standard account/core utilities,
-and network access to install Python dependencies. On Debian or Ubuntu, install
-the common prerequisites with:
+The installer targets standard GNU/Linux systemd distributions and requires
+root, systemd, Python 3.11+, Python `venv` support, `flock`, GNU `mv`/`readlink`,
+standard account/core utilities, and network access to install Python
+dependencies. On Debian or Ubuntu, install the common prerequisites with:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3 python3-venv ca-certificates
+sudo apt-get install -y python3 python3-venv ca-certificates util-linux coreutils
 ```
 
 On RHEL-family systems, install the equivalent Python, pip/venv, systemd, and
@@ -119,18 +119,43 @@ before creating service users or writing configuration.
 sudo sh scripts/install-systemd.sh
 ```
 
-This creates dedicated service users, installs the project into `/opt/arena-hero-agent/.venv`, stores the Arena Hero credential as `/etc/arena-hero-agent.env` with restricted permissions, and enables:
+This creates dedicated service users, stores the Arena Hero credential as
+`/etc/arena-hero-agent.env` with restricted permissions, and uses this release
+layout:
+
+```text
+/opt/arena-hero-agent/
+├── releases/<version-timestamp-instance>/.venv
+├── current -> releases/<active-release>
+└── previous -> releases/<rollback-release>
+```
+
+Every install creates a fresh staging virtual environment, installs both
+hash-locked dependency sets, runs `pip check` and all CLI self-checks, then
+renames the staging directory into an immutable release. Only after those steps
+succeed does one atomic symlink replacement activate `current`. The installer
+then enables:
 
 - `arena-hero-agent.service`
 - `arena-hero-version-monitor.timer`
 
 The installer runs the compatibility check once before starting the Agent. A
-failed or changed contract stops the installation before unattended play begins.
+failed or changed contract, failed service restart, or failed post-restart
+health probe restores the old `current`/`previous` links, prior unit
+enablement/running state, and the old release. Link changes are journaled: a
+handled interruption restores them immediately, while the next install or
+rollback repairs a transaction left by an uncatchable process or host failure.
+The failed immutable release is retained for diagnosis.
 
 The installer preserves an existing game credential and runtime tuning file
-during upgrades. After a successful compatibility check, it explicitly
-restarts the main Agent so an already-running installation cannot continue
-using old in-memory code.
+during upgrades. It also preserves a pre-versioned `/opt/arena-hero-agent/.venv`
+and exposes it through `previous` during the first migration. After a successful
+compatibility check, it explicitly restarts the main Agent so an already-running
+installation cannot continue using old in-memory code.
+
+`--no-start` still installs the units and activates the new release, but it does
+not enable, start, restart, or health-check services. Use it only when another
+provisioning step owns service activation.
 
 For non-interactive provisioning, put only the key on the first line of a protected file:
 
@@ -191,7 +216,7 @@ sudo sh scripts/install-systemd.sh --without-optimizer
 sudo systemctl status arena-hero-agent.service --no-pager
 sudo journalctl -fu arena-hero-agent.service -o short-iso-precise
 sudo systemctl list-timers 'arena-hero-*'
-sudo /opt/arena-hero-agent/.venv/bin/arena-hero-health --require-supervisor
+sudo /opt/arena-hero-agent/current/.venv/bin/arena-hero-health --require-supervisor
 ```
 
 Omit `--require-supervisor` when the optional supervisor timer was not installed.
@@ -217,22 +242,41 @@ The supervisor and optimizer are oneshot services; stop an active run with `syst
 
 ### Updating and rollback
 
-Check out a reviewed release and rerun the installer. Existing `/etc` credentials and runtime tuning are retained unless an explicit replacement file is provided.
+Check out a reviewed release and rerun the installer. Existing `/etc`
+credentials and runtime tuning are retained unless an explicit replacement
+file is provided. Installer and rollback operations share a non-blocking
+deployment lock; a concurrent operation exits without changing release links.
+Both commands recover a pending release-link transaction before reading
+`current` or `previous`.
 
 Before updating, record the installed version and back up the restricted configuration:
 
 ```bash
-/opt/arena-hero-agent/.venv/bin/python -m pip show arena-hero-agent
+readlink -f /opt/arena-hero-agent/current
+readlink -f /opt/arena-hero-agent/previous || true
+/opt/arena-hero-agent/current/.venv/bin/python -m pip show arena-hero-agent
 sudo install -d -m 0700 /root/arena-hero-agent-backup
 sudo cp -a /etc/arena-hero-agent.env /etc/arena-hero-agent /root/arena-hero-agent-backup/
 ```
 
-To roll back, check out the previous release and rerun
-`sudo sh scripts/install-systemd.sh`. The installer updates the existing virtual
-environment from the selected source tree and restarts the Agent after the
-compatibility check. This is a source rollback, not an atomic environment
-snapshot: retain the previous release checkout or wheel and verify health after
-every update.
+After a successful upgrade, roll back without rebuilding or contacting a
+package index:
+
+```bash
+sudo arena-hero-rollback
+sudo /opt/arena-hero-agent/current/.venv/bin/arena-hero-health
+```
+
+The command validates that both links resolve inside `releases/`, atomically
+switches `current`, runs compatibility and health checks, and makes the replaced
+release the new `previous`. Running it again switches forward. If the selected
+release fails validation, compatibility, restart, or health checks, the original
+link pair and service are restored. A first installation has no rollback target
+unless a legacy `.venv` was migrated.
+
+Releases are not pruned automatically. Keep at least the `current` and
+`previous` targets; delete any older unreferenced release only after resolving
+its absolute path and verifying that neither symlink selects it.
 
 ### Uninstall
 
@@ -254,6 +298,7 @@ sudo rm -f /etc/systemd/system/arena-hero-agent.service
 sudo rm -f /etc/systemd/system/arena-hero-version-monitor.service /etc/systemd/system/arena-hero-version-monitor.timer
 sudo rm -f /etc/systemd/system/arena-hero-supervisor.service /etc/systemd/system/arena-hero-supervisor.timer
 sudo rm -f /etc/systemd/system/arena-hero-optimizer.service /etc/systemd/system/arena-hero-optimizer.timer
+sudo rm -f /usr/local/sbin/arena-hero-rollback
 sudo rm -rf /opt/arena-hero-agent /etc/arena-hero-agent /var/lib/arena-hero-supervisor /var/lib/arena-hero-optimizer
 sudo rm -f /etc/arena-hero-agent.env /etc/arena-hero-supervisor.env
 sudo systemctl daemon-reload
