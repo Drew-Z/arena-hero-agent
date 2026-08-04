@@ -7,7 +7,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from arena_health import build_health_report, check_heartbeat, write_heartbeat
+from arena_health import build_health_report, check_heartbeat, check_report, write_heartbeat
 
 
 NOW = datetime(2026, 8, 3, 12, 0, tzinfo=UTC)
@@ -156,6 +156,96 @@ class ArenaHealthTests(unittest.TestCase):
 
             self.assertEqual(report["status"], "unhealthy")
             self.assertFalse(report["checks"]["version"]["ok"])
+
+    def test_stale_optional_supervisor_report_does_not_fail_health(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            heartbeat = root / "heartbeat.json"
+            version = root / "version.json"
+            supervisor = root / "supervisor.json"
+            write_heartbeat(
+                heartbeat,
+                tick=99,
+                resources=25,
+                population=19,
+                core_alive=True,
+                generated_at=NOW,
+            )
+            version.write_text(
+                json.dumps(
+                    {
+                        "checked_at": "2026-08-03T11:00:00Z",
+                        "status": "compatible",
+                        "hold": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            supervisor.write_text(
+                json.dumps(
+                    {
+                        "generated_at": "2026-08-02T11:00:00Z",
+                        "status": "watch",
+                        "requires_human": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def runner(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    "ActiveState=active\nSubState=running\nNRestarts=0\n",
+                    "",
+                )
+
+            report = build_health_report(
+                heartbeat_path=heartbeat,
+                max_heartbeat_age_seconds=180,
+                heartbeat_only=False,
+                service="arena-hero-agent.service",
+                version_report=version,
+                supervisor_report=supervisor,
+                require_supervisor=False,
+                max_report_age_seconds=7 * 60 * 60,
+                now=NOW,
+                runner=runner,
+            )
+
+            self.assertEqual(report["status"], "healthy")
+            self.assertTrue(report["checks"]["supervisor"]["ok"])
+            self.assertEqual(
+                report["checks"]["supervisor"]["reason"],
+                "optional_report_ignored",
+            )
+
+    def test_unreadable_report_only_fails_when_required(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            report_path = Path(directory) / "invalid.json"
+            report_path.write_text("not-json", encoding="utf-8")
+
+            optional = check_report(
+                report_path,
+                timestamp_field="generated_at",
+                max_age_seconds=7 * 60 * 60,
+                allowed_statuses={"healthy", "watch"},
+                now=NOW,
+                required=False,
+            )
+            required = check_report(
+                report_path,
+                timestamp_field="generated_at",
+                max_age_seconds=7 * 60 * 60,
+                allowed_statuses={"healthy", "watch"},
+                now=NOW,
+                required=True,
+            )
+
+            self.assertTrue(optional["ok"])
+            self.assertEqual(optional["reason"], "optional_report_ignored")
+            self.assertFalse(required["ok"])
+            self.assertEqual(required["reason"], "report_unavailable:JSONDecodeError")
 
 
 if __name__ == "__main__":

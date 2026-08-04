@@ -190,15 +190,22 @@ def check_report(
         status = payload.get("status")
         hold = bool(payload.get("hold", False))
         requires_human = bool(payload.get("requires_human", False))
-        ok = (
+        report_ok = (
             status in allowed_statuses
             and not hold
             and not requires_human
             and age_seconds <= max_age_seconds
         )
+        ok = report_ok or not required
+        if report_ok:
+            reason = "ok"
+        elif required:
+            reason = "report_stale_or_unhealthy"
+        else:
+            reason = "optional_report_ignored"
         return {
             "ok": ok,
-            "reason": "ok" if ok else "report_stale_or_unhealthy",
+            "reason": reason,
             "path": str(path),
             "age_seconds": round(age_seconds, 3),
             "status": status,
@@ -207,8 +214,12 @@ def check_report(
         }
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return {
-            "ok": False,
-            "reason": f"report_unavailable:{type(exc).__name__}",
+            "ok": not required,
+            "reason": (
+                f"report_unavailable:{type(exc).__name__}"
+                if required
+                else "optional_report_ignored"
+            ),
             "path": str(path),
         }
 
