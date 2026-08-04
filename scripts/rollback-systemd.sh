@@ -78,8 +78,13 @@ trap cleanup EXIT
 on_signal() {
     trap - EXIT HUP INT TERM
     if [ "$LINK_TRANSACTION_ACTIVE" -eq 1 ] && [ "$SERVICE_STATE_CAPTURED" -eq 1 ]; then
-        restore_original_release || rollback_link_transaction || true
-        finish_link_transaction
+        if restore_original_release; then
+            finish_link_transaction
+        elif rollback_link_transaction; then
+            finish_link_transaction
+        else
+            echo "Interrupted rollback could not be restored; keeping the transaction journal." >&2
+        fi
     fi
     cleanup
     exit 1
