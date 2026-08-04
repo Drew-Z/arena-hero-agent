@@ -120,6 +120,9 @@ if [ -n "${FAKE_SYSTEMCTL_SIGNAL_ONCE_PATTERN:-}" ]; then
             marker=${FAKE_SYSTEMCTL_SIGNAL_MARKER:?}
             if [ ! -e "$marker" ]; then
                 : > "$marker"
+                if [ -n "${FAKE_SYSTEMCTL_REMOVE_PATH_ON_SIGNAL:-}" ]; then
+                    rm -rf -- "$FAKE_SYSTEMCTL_REMOVE_PATH_ON_SIGNAL"
+                fi
                 kill -TERM "$PPID"
                 sleep 1
                 exit 1
@@ -286,6 +289,45 @@ os.execv("/usr/bin/install", ["install", *args])
         calls = self.systemctl_log.read_text(encoding="utf-8").splitlines()
         self.assertIn("disable arena-hero-agent.service", calls)
         self.assertIn("stop arena-hero-agent.service", calls)
+
+    def test_install_signal_preserves_journal_when_all_recovery_fails(self) -> None:
+        self.assertEqual(self._install("--no-start").returncode, 0)
+        current = self._resolved("current")
+        transaction = self.install_root / ".link-transaction"
+        env = self.env | {
+            "FAKE_SYSTEMCTL_SIGNAL_ONCE_PATTERN": "start arena-hero-version-monitor.service",
+            "FAKE_SYSTEMCTL_SIGNAL_MARKER": str(self.root / "signal-sent"),
+            "FAKE_SYSTEMCTL_REMOVE_PATH_ON_SIGNAL": str(current),
+        }
+
+        interrupted = self._install(env=env)
+
+        self.assertNotEqual(interrupted.returncode, 0)
+        self.assertTrue(transaction.is_file())
+        self.assertEqual(transaction.read_text(encoding="utf-8"), f"{current.name}\n\n")
+        self.assertIn("keeping the transaction journal", interrupted.stderr)
+
+    def test_rollback_signal_preserves_journal_when_all_recovery_fails(self) -> None:
+        self.assertEqual(self._install("--no-start").returncode, 0)
+        previous = self._resolved("current")
+        self.assertEqual(self._install("--no-start").returncode, 0)
+        current = self._resolved("current")
+        transaction = self.install_root / ".link-transaction"
+        env = self.env | {
+            "FAKE_SYSTEMCTL_SIGNAL_ONCE_PATTERN": "start arena-hero-version-monitor.service",
+            "FAKE_SYSTEMCTL_SIGNAL_MARKER": str(self.root / "signal-sent"),
+            "FAKE_SYSTEMCTL_REMOVE_PATH_ON_SIGNAL": str(current),
+        }
+
+        interrupted = self._run(ROLLBACK, env=env)
+
+        self.assertNotEqual(interrupted.returncode, 0)
+        self.assertTrue(transaction.is_file())
+        self.assertEqual(
+            transaction.read_text(encoding="utf-8"),
+            f"{current.name}\n{previous.name}\n",
+        )
+        self.assertIn("keeping the transaction journal", interrupted.stderr)
 
     def test_rollback_rejects_previous_link_outside_release_root(self) -> None:
         self.assertEqual(self._install("--no-start").returncode, 0)
