@@ -300,7 +300,10 @@ sudo rm -f /etc/systemd/system/arena-hero-version-monitor.service /etc/systemd/s
 sudo rm -f /etc/systemd/system/arena-hero-supervisor.service /etc/systemd/system/arena-hero-supervisor.timer
 sudo rm -f /etc/systemd/system/arena-hero-optimizer.service /etc/systemd/system/arena-hero-optimizer.timer
 sudo rm -f /usr/local/sbin/arena-hero-rollback
-sudo rm -rf /opt/arena-hero-agent /etc/arena-hero-agent /var/lib/arena-hero-supervisor /var/lib/arena-hero-optimizer
+sudo rm -f /var/lib/systemd/timers/stamp-arena-hero-version-monitor.timer
+sudo rm -f /var/lib/systemd/timers/stamp-arena-hero-supervisor.timer /var/lib/systemd/timers/stamp-arena-hero-optimizer.timer
+sudo rm -rf /opt/arena-hero-agent /etc/arena-hero-agent
+sudo rm -rf /var/lib/arena-hero-version /var/lib/arena-hero-supervisor /var/lib/arena-hero-optimizer
 sudo rm -f /etc/arena-hero-agent.env /etc/arena-hero-supervisor.env
 sudo systemctl daemon-reload
 sudo systemctl reset-failed
@@ -308,7 +311,23 @@ sudo systemctl reset-failed
 
 Complete removal permanently deletes credentials and local reports. Service
 accounts are intentionally retained because deleting users is host-policy
-specific.
+specific. To remove them too, first verify that the dedicated accounts own no
+files outside the paths above. Then remove only these users and their same-name
+groups; never remove the shared `systemd-journal` group:
+
+```bash
+sudo userdel arena-hero
+sudo userdel arena-hero-version
+sudo userdel arena-hero-supervisor
+sudo groupdel arena-hero 2>/dev/null || true
+sudo groupdel arena-hero-version 2>/dev/null || true
+sudo groupdel arena-hero-supervisor 2>/dev/null || true
+```
+
+Source checkouts, deployment directories under `/tmp`, and operator-created
+backups are not owned by the installer. Inspect and resolve each exact path
+before deleting those separately; do not remove a broad parent directory or an
+unresolved wildcard.
 
 ## Credential Hygiene
 
