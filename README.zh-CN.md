@@ -4,6 +4,7 @@
 
 [![CI](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/ci.yml)
 [![发布镜像](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/release.yml/badge.svg)](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/release.yml)
+[![最新版本](https://img.shields.io/github/v/release/Drew-Z/arena-hero-agent)](https://github.com/Drew-Z/arena-hero-agent/releases/latest)
 [![许可证](https://img.shields.io/github/license/Drew-Z/arena-hero-agent)](LICENSE)
 
 这是一个面向 [Arena Hero](https://doc.arenahero.io/zh-Hans/) 的确定性、资源优先长期运行 Agent。项目采用分层威胁控制器和官方 `arena-hero` Python SDK，可在本地、Docker 或 Linux systemd 环境运行。
@@ -78,7 +79,7 @@ Compose 会以 Docker secret 挂载 key。容器使用非特权用户和只读�
 无需本地构建，直接使用发布镜像：
 
 ```bash
-ARENA_HERO_AGENT_IMAGE=ghcr.io/drew-z/arena-hero-agent:0.1.0 docker compose up -d --no-build
+ARENA_HERO_AGENT_IMAGE=ghcr.io/drew-z/arena-hero-agent:0.2.0 docker compose up -d --no-build
 ```
 
 ### Linux 服务器 systemd
@@ -93,7 +94,8 @@ sudo journalctl -fu arena-hero-agent.service -o short-iso-precise
 Ubuntu 22.04 默认是 Python 3.10。请安装系统级 Python 3.11+ 及匹配的
 `venv` 包，并通过 `--python` 指定；Debian、Ubuntu、RHEL/Alma/Rocky、
 Fedora、Arch 和 openSUSE 的差异详见
-[Linux 支持矩阵](docs/deployment.md#linux-systemd-server)。
+[中文服务器部署与运维](docs/deployment.zh-CN.md)；完整发行版支持矩阵见
+[英文部署文档](docs/deployment.md#linux-systemd-server)。
 
 安装器会隐藏输入 API key，在 `/opt/arena-hero-agent/releases` 下构建不可变
 版本并原子切换 `current` 链接，默认只启用主 Agent 和每六小时一次的版本兼容
@@ -138,9 +140,9 @@ sudo sh scripts/install-systemd.sh --with-optimizer
 
 模型结果只用于只读建议，不能提交游戏操作、修改策略或重启 Agent。独立 optimizer 可以修改少量运行参数并重启 systemd 服务，因此需要 root，默认关闭。
 
-完整说明见 [配置文档](docs/configuration.md)、[部署文档](docs/deployment.md) 和 [策略文档](docs/strategy.md)。
+完整说明见 [中文服务器部署与运维](docs/deployment.zh-CN.md)、[配置文档](docs/configuration.md)、[英文部署文档](docs/deployment.md) 和 [策略文档](docs/strategy.md)。
 
-首次公开提交前请按 [发布检查清单](docs/release-checklist.md) 检查凭据、日志和 Git 暂存区。
+发布版本前请按 [发布检查清单](docs/release-checklist.md) 核对版本、凭据、测试、标签和镜像。
 
 ## 文档与社区
 

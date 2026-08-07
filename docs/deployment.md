@@ -108,8 +108,8 @@ The secret file stays on the host and is never copied into the image. Docker Com
 Tagged releases publish a prebuilt image to GHCR. To deploy it without building:
 
 ```bash
-ARENA_HERO_AGENT_IMAGE=ghcr.io/drew-z/arena-hero-agent:0.1.0 docker compose pull
-ARENA_HERO_AGENT_IMAGE=ghcr.io/drew-z/arena-hero-agent:0.1.0 docker compose up -d --no-build
+ARENA_HERO_AGENT_IMAGE=ghcr.io/drew-z/arena-hero-agent:0.2.0 docker compose pull
+ARENA_HERO_AGENT_IMAGE=ghcr.io/drew-z/arena-hero-agent:0.2.0 docker compose up -d --no-build
 ```
 
 ## Linux systemd Server
@@ -358,12 +358,27 @@ unrelated shell variable cannot replace the protected systemd credential.
 
 After Git validation, the updater archives the exact remote-tracking commit and
 extracts it into a root-owned temporary directory before invoking the
-transactional installer with no configuration overrides. The privileged build
-therefore cannot silently consume a later edit or a second updater's checkout.
+transactional installer with no service, component, or credential overrides.
+The privileged build therefore cannot silently consume a later edit or a second
+updater's checkout.
 Existing `/etc` credentials, runtime tuning, private AI configuration, and
 enabled optional components are retained. Running the command while the checkout
 is already current still redeploys that commit, which is useful when the source
 checkout is newer than the active instance.
+
+If a configured package mirror has not synchronized a newly pinned dependency,
+retry the same transaction against an explicit trusted HTTPS index:
+
+```bash
+ARENA_PIP_INDEX_URL=https://pypi.org/simple sh scripts/update-systemd.sh
+```
+
+The override is passed through the updater's privilege boundary, disables pip
+configuration files for dependency installation, replaces the primary index,
+clears extra indexes, and still requires every locked artifact hash to match.
+URLs containing credentials, whitespace, or a scheme other than HTTPS are
+rejected. The setting applies only to that command and does not rewrite system
+or user pip configuration.
 
 The updater records the full object ID in the immutable release. Verify it with:
 

@@ -38,6 +38,9 @@ class SystemdUpdateTests(unittest.TestCase):
             r'''#!/bin/sh
 printf 'key=%s\n' "${ARENA_HERO_API_KEY-unset}" > "$FAKE_INSTALLER_LOG"
 printf 'commit=%s\n' "${ARENA_SOURCE_COMMIT-unset}" >> "$FAKE_INSTALLER_LOG"
+if [ -n "${ARENA_PIP_INDEX_URL:-}" ]; then
+    printf 'index=%s\n' "$ARENA_PIP_INDEX_URL" >> "$FAKE_INSTALLER_LOG"
+fi
 exit "${FAKE_INSTALLER_EXIT:-0}"
 ''',
         )
@@ -200,6 +203,45 @@ exec "$@"
             f"key=\ncommit={self.env['FAKE_TARGET_COMMIT']}\n",
         )
         self.assertIn("exit 88", (self.scripts / "install-systemd.sh").read_text())
+
+    def test_forwards_explicit_https_package_index_through_sudo(self) -> None:
+        env = self.env | {
+            "ARENA_HERO_API_KEY": "must-not-reach-installer",
+            "ARENA_PIP_INDEX_URL": "https://pypi.org/simple",
+        }
+
+        result = self._run(env=env)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.installer_log.read_text(encoding="utf-8"),
+            (
+                f"key=\ncommit={self.env['FAKE_TARGET_COMMIT']}\n"
+                "index=https://pypi.org/simple\n"
+            ),
+        )
+        self.assertNotIn("must-not-reach-installer", result.stdout + result.stderr)
+        self.assertIn(
+            "ARENA_PIP_INDEX_URL=https://pypi.org/simple",
+            self.sudo_log.read_text(encoding="utf-8"),
+        )
+
+    def test_rejects_unsafe_package_index_before_git(self) -> None:
+        for index_url in (
+            "http://pypi.org/simple",
+            "https://user@example.com/simple",
+            "https:///simple",
+            "https://pypi.org/simple path",
+        ):
+            with self.subTest(index_url=index_url):
+                result = self._run(
+                    env=self.env | {"ARENA_PIP_INDEX_URL": index_url}
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("ARENA_PIP_INDEX_URL", result.stderr)
+                self.assertFalse(self.git_log.exists())
+                self.assertFalse(self.installer_log.exists())
 
     def test_current_upstream_is_redeployed_without_merge(self) -> None:
         env = self.env | {

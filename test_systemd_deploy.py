@@ -200,6 +200,12 @@ if [ "${1:-}" = "-m" ] && [ "${2:-}" = "venv" ]; then
     exit 0
 fi
 if [ "${1:-}" = "-m" ] && [ "${2:-}" = "pip" ]; then
+    if [ -n "${FAKE_PIP_ENV_LOG:-}" ]; then
+        printf 'config=%s index=%s extra=%s\n' \
+            "${PIP_CONFIG_FILE-unset}" \
+            "${PIP_INDEX_URL-unset}" \
+            "${PIP_EXTRA_INDEX_URL-unset}" >> "$FAKE_PIP_ENV_LOG"
+    fi
     if [ -n "${FAKE_PIP_FAIL_ONCE_FILE:-}" ] && [ ! -e "$FAKE_PIP_FAIL_ONCE_FILE" ]; then
         : > "$FAKE_PIP_FAIL_ONCE_FILE"
         exit 1
@@ -423,6 +429,40 @@ os.execv("/usr/bin/install", ["install", *args])
             (release / "source-commit").read_text(encoding="utf-8"),
             f"{source_commit}\n",
         )
+
+    def test_explicit_package_index_ignores_host_pip_configuration(self) -> None:
+        pip_log = self.root / "pip-env.log"
+        env = self.env | {
+            "ARENA_PIP_INDEX_URL": "https://pypi.org/simple",
+            "FAKE_PIP_ENV_LOG": str(pip_log),
+            "PIP_CONFIG_FILE": "/host/pip.conf",
+            "PIP_EXTRA_INDEX_URL": "https://untrusted.invalid/simple",
+        }
+
+        result = self._install("--no-start", env=env)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = pip_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(
+            set(lines),
+            {"config=/dev/null index=https://pypi.org/simple extra="},
+        )
+
+    def test_rejects_unsafe_package_index_before_host_changes(self) -> None:
+        for index_url in (
+            "https://user@example.com/simple",
+            "https:///simple",
+        ):
+            with self.subTest(index_url=index_url):
+                env = self.env | {"ARENA_PIP_INDEX_URL": index_url}
+
+                result = self._install("--no-start", env=env)
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("ARENA_PIP_INDEX_URL", result.stderr)
+                self.assertFalse(self.install_root.exists())
+                self.assertFalse(self.account_log.exists())
 
     def test_rejects_invalid_source_commit_before_host_changes(self) -> None:
         env = self.env | {"ARENA_SOURCE_COMMIT": "not-a-git-object"}

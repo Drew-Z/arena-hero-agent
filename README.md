@@ -4,6 +4,7 @@
 
 [![CI](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/ci.yml)
 [![Release image](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/release.yml/badge.svg)](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/Drew-Z/arena-hero-agent)](https://github.com/Drew-Z/arena-hero-agent/releases/latest)
 [![License](https://img.shields.io/github/license/Drew-Z/arena-hero-agent)](LICENSE)
 
 A deterministic, resource-first long-running agent for [Arena Hero](https://doc.arenahero.io/). It uses a hierarchical threat controller and the official `arena-hero` Python SDK, keeps decisions inside the 15-second Tick window, and can run locally, in Docker, or as hardened systemd services.
@@ -92,7 +93,7 @@ Compose mounts the key as a Docker secret. The image runs as an unprivileged use
 Use the published image without a local build:
 
 ```bash
-ARENA_HERO_AGENT_IMAGE=ghcr.io/drew-z/arena-hero-agent:0.1.0 docker compose up -d --no-build
+ARENA_HERO_AGENT_IMAGE=ghcr.io/drew-z/arena-hero-agent:0.2.0 docker compose up -d --no-build
 ```
 
 ### Linux server with systemd
@@ -173,7 +174,7 @@ Common Agent options:
 
 See [configuration](docs/configuration.md), [deployment](docs/deployment.md), and [strategy](docs/strategy.md) for the complete operational contract.
 
-Before the first public commit, follow the [release checklist](docs/release-checklist.md).
+Before publishing a version, follow the [release checklist](docs/release-checklist.md).
 
 ## Documentation and Community
 

@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-08
+
 ### Added
 
 - Hash-locked runtime and build dependency sets shared by local bootstrap, CI, Docker, and systemd installation.
@@ -11,9 +13,7 @@ All notable changes to this project will be documented in this file. The format 
 - Public documentation navigation, executable clone-first quick starts, compatibility fields in bug reports, and clearer community reporting guidance.
 - Release tags now pass the complete reusable CI workflow before publishing, with version validation, SBOM, provenance, and image-digest reporting.
 - Tolerant stationary-Core confirmation across short visibility gaps, while still requiring three real same-position observations before a raid.
-- Structured v0.11 upkeep due/paid/deficit and excess-Unit damage diagnostics with deterministic supervisor and optional model-review triggers.
 - Bounded long-range raids against confirmed stationary, unprotected Cores, with strike-distance hysteresis and immediate combat-pressure recall.
-- Gameplay v0.13 and official SDK 0.2.8 compatibility, including conservative Ranger cell fire against a confirmed stationary Core during short visibility gaps.
 - Hierarchical lifecycle and threat assessment with explicit posture/reason diagnostics for alerts, pre-evasion, engagement, multi-axis breakout, recovery, and compatibility hold.
 - Gameplay v0.14 and official SDK 0.2.9 compatibility, including dynamic Unit-price boundary tests and authoritative spawn-cost reconciliation.
 - Vision-aware resource invalidation and Core-observer positioning using integer supercover lines instead of distance-only visibility assumptions.
@@ -31,6 +31,7 @@ All notable changes to this project will be documented in this file. The format 
 - Recovery now rebuilds Workers and early defenders in explicit stages. Same-Tick deposits can fund Core actions while queued Unit healing remains reserved.
 - Vanguards and Rangers coordinate projected damage to reduce overkill; Rangers use precise target fire when multiple hostiles occupy one cell.
 - Health checks reject timestamps beyond a five-second future-skew allowance. Version monitoring tolerates two transient failures only when backed by a recent compatible baseline and fails closed on the third.
+- systemd installation and one-command updates accept a validated, command-scoped `ARENA_PIP_INDEX_URL` override when a configured package mirror lags a newly pinned release.
 
 ## [0.1.0] - 2026-08-03
 
@@ -50,3 +51,7 @@ All notable changes to this project will be documented in this file. The format 
 - Model IDs and model credentials are no longer embedded in systemd units.
 - The main systemd service no longer depends on a supervisor refresh timer.
 - systemd installation now requires an immediate compatibility check before starting the Agent.
+
+[Unreleased]: https://github.com/Drew-Z/arena-hero-agent/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Drew-Z/arena-hero-agent/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/Drew-Z/arena-hero-agent/releases/tag/v0.1.0

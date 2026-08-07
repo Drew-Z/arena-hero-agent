@@ -6,6 +6,8 @@ Use the document that matches the task:
   optional model review, and optimizer settings.
 - [Deployment](deployment.md): local, Docker Compose, and hardened systemd
   installation, operations, rollback, and uninstall procedures.
+- [服务器部署与运维（简体中文）](deployment.zh-CN.md): systemd 安装、快速更新、
+  回滚、停止、健康检查和镜像源故障处理。
 - [Strategy](strategy.md): deterministic resource, survival, defense, scouting,
   and bounded-combat policy.
 - [Threat response](threat-response.md): alert, pre-evasion, multi-axis

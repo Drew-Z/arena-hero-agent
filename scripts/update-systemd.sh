@@ -8,6 +8,7 @@ GIT_BIN=${ARENA_UPDATE_GIT_BIN:-git}
 SUDO_BIN=${ARENA_UPDATE_SUDO_BIN:-sudo}
 ID_BIN=${ARENA_UPDATE_ID_BIN:-id}
 STAT_BIN=${ARENA_UPDATE_STAT_BIN:-stat}
+PIP_INDEX_URL_OVERRIDE=${ARENA_PIP_INDEX_URL:-}
 SOURCE_ARCHIVE=
 
 usage() {
@@ -18,6 +19,9 @@ Fast-forward the current checkout to its configured upstream, archive that exact
 commit, then switch the running systemd Agent from the old strategy process to
 the new strategy. Run this command as the checkout owner, without sudo;
 privilege escalation happens only for isolated deployment and service restart.
+
+Set ARENA_PIP_INDEX_URL to a trusted HTTPS package index only when the configured
+mirror has not synchronized a pinned dependency.
 EOF
 }
 
@@ -49,9 +53,14 @@ require_command() {
 require_command "$GIT_BIN"
 require_command "$ID_BIN"
 require_command "$STAT_BIN"
-for command_name in chmod mktemp rm tar; do
+for command_name in chmod grep mktemp rm tar; do
     require_command "$command_name"
 done
+if [ -n "$PIP_INDEX_URL_OVERRIDE" ] && ! printf '%s\n' "$PIP_INDEX_URL_OVERRIDE" | \
+    grep -Eq '^https://[^/[:space:]@]+(/[^[:space:]@]*)?$'; then
+    echo "ARENA_PIP_INDEX_URL must be an HTTPS URL without credentials or whitespace." >&2
+    exit 2
+fi
 current_uid=$("$ID_BIN" -u)
 case "$current_uid" in
     ""|*[!0-9]*)
@@ -209,11 +218,16 @@ ARENA_HERO_API_KEY= ARENA_SOURCE_COMMIT="$commit" \
 
 run_installer() {
     if [ "$current_uid" -eq 0 ]; then
-        ARENA_HERO_API_KEY= sh -c "$INSTALL_ARCHIVE_COMMAND" \
+        ARENA_HERO_API_KEY= \
+        ARENA_PIP_INDEX_URL="$PIP_INDEX_URL_OVERRIDE" \
+            sh -c "$INSTALL_ARCHIVE_COMMAND" \
             arena-hero-update "$SOURCE_ARCHIVE" "$target_commit"
     else
         require_command "$SUDO_BIN"
-        "$SUDO_BIN" env ARENA_HERO_API_KEY= sh -c "$INSTALL_ARCHIVE_COMMAND" \
+        "$SUDO_BIN" env \
+            ARENA_HERO_API_KEY= \
+            ARENA_PIP_INDEX_URL="$PIP_INDEX_URL_OVERRIDE" \
+            sh -c "$INSTALL_ARCHIVE_COMMAND" \
             arena-hero-update "$SOURCE_ARCHIVE" "$target_commit"
     fi
 }

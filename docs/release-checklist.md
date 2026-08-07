@@ -1,6 +1,7 @@
 # Public Release Checklist
 
-Use this checklist from a clean reviewed checkout before creating the GitHub repository or pushing the first commit.
+Use this checklist from a clean reviewed checkout before the first public commit
+and before every tagged release.
 
 ## Before Git
 
@@ -24,6 +25,24 @@ git ls-files .env secrets/arena_hero_api_key.txt
 ```
 
 The last command must print nothing. Do not use `git add -f` for credential files.
+
+## Every Release
+
+- Start from a clean `main` that is synchronized with `origin/main`.
+- Choose the next semantic version and update `project.version` in
+  `pyproject.toml`.
+- Move user-visible entries from `Unreleased` into a dated version section in
+  `CHANGELOG.md` and update comparison links.
+- Update pinned GHCR examples and any version-specific compatibility text in
+  both READMEs.
+- Validate the intended tag before committing:
+
+```bash
+python scripts/check_release_tag.py --tag vX.Y.Z
+```
+
+Do not create the tag until the release commit is on `origin/main` and its CI
+run is successful.
 
 ## Validation
 
@@ -61,3 +80,23 @@ skips these Linux-specific checks.
 The release workflow rejects a tag that does not exactly match the version in
 `pyproject.toml`, waits for the complete reusable CI workflow, and publishes
 SBOM and provenance attestations alongside the image digest.
+
+## Publish And Verify
+
+After the release commit passes CI:
+
+```bash
+git tag -a vX.Y.Z -m "Arena Hero Agent vX.Y.Z"
+git push origin vX.Y.Z
+```
+
+Wait for the `Release image` workflow to finish successfully before creating or
+announcing the GitHub Release. Then verify:
+
+- the GitHub Release points to the tagged commit and summarizes the dated
+  Changelog section;
+- `ghcr.io/drew-z/arena-hero-agent:X.Y.Z` exists for every published platform;
+- README installation commands reference the new immutable version tag;
+- a clean Compose deployment can pull the image without rebuilding;
+- any separately managed production instance reports the intended full source
+  commit after its transactional update.

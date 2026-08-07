@@ -16,6 +16,7 @@ ROLLBACK_BIN=${ARENA_ROLLBACK_BIN:-/usr/local/sbin/arena-hero-rollback}
 SYSTEMCTL_BIN=${ARENA_SYSTEMCTL_BIN:-systemctl}
 PYTHON_BIN=${PYTHON_BIN:-}
 SOURCE_COMMIT=${ARENA_SOURCE_COMMIT:-}
+PIP_INDEX_URL_OVERRIDE=${ARENA_PIP_INDEX_URL:-}
 HEALTH_ATTEMPTS=${ARENA_HEALTH_ATTEMPTS:-12}
 HEALTH_INTERVAL=${ARENA_HEALTH_INTERVAL:-10}
 MIN_SYSTEMD_VERSION=235
@@ -53,6 +54,9 @@ Options:
   --no-start            Activate the release without enabling, starting, or checking services.
   --python PATH         Explicit Python 3.11+ interpreter (default: auto-detect).
   -h, --help            Show this help.
+
+Environment:
+  ARENA_PIP_INDEX_URL   Trusted HTTPS package index for this install only.
 EOF
 }
 
@@ -160,6 +164,17 @@ select_python() {
     exit 2
 }
 
+run_pip() {
+    if [ -n "$PIP_INDEX_URL_OVERRIDE" ]; then
+        PIP_CONFIG_FILE=/dev/null \
+        PIP_INDEX_URL=$PIP_INDEX_URL_OVERRIDE \
+        PIP_EXTRA_INDEX_URL= \
+            "$@"
+    else
+        "$@"
+    fi
+}
+
 check_systemd_version() {
     version_line=$("$SYSTEMCTL_BIN" --version 2>/dev/null | sed -n '1p') || {
         echo "Unable to read the installed systemd version." >&2
@@ -199,6 +214,11 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 check_systemd_version
 select_python
+if [ -n "$PIP_INDEX_URL_OVERRIDE" ] && ! printf '%s\n' "$PIP_INDEX_URL_OVERRIDE" | \
+    grep -Eq '^https://[^/[:space:]@]+(/[^[:space:]@]*)?$'; then
+    echo "ARENA_PIP_INDEX_URL must be an HTTPS URL without credentials or whitespace." >&2
+    exit 2
+fi
 if [ -n "$SOURCE_COMMIT" ] && ! printf '%s\n' "$SOURCE_COMMIT" | \
     grep -Eq '^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$'; then
     echo "ARENA_SOURCE_COMMIT must be a full 40- or 64-character Git object ID." >&2
@@ -493,13 +513,13 @@ fi
 
 install -d -o root -g root -m 0755 "$BUILD_DIR"
 "$PYTHON_BIN" -m venv "$BUILD_DIR/.venv"
-"$BUILD_DIR/.venv/bin/python" -m pip install --require-hashes \
+run_pip "$BUILD_DIR/.venv/bin/python" -m pip install --require-hashes \
     -r "$PROJECT_ROOT/requirements-build.lock"
-"$BUILD_DIR/.venv/bin/python" -m pip install --require-hashes \
+run_pip "$BUILD_DIR/.venv/bin/python" -m pip install --require-hashes \
     -r "$PROJECT_ROOT/requirements.lock"
-"$BUILD_DIR/.venv/bin/python" -m pip install --no-deps \
+run_pip "$BUILD_DIR/.venv/bin/python" -m pip install --no-deps \
     --no-build-isolation "$PROJECT_ROOT"
-"$BUILD_DIR/.venv/bin/python" -m pip check
+run_pip "$BUILD_DIR/.venv/bin/python" -m pip check
 for command_name in \
     arena-hero-agent \
     arena-hero-health \

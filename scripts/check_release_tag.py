@@ -21,7 +21,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Validate that a release tag matches pyproject.toml."
     )
-    parser.add_argument("--tag", required=True, help="Git tag, for example v0.1.0.")
+    parser.add_argument("--tag", required=True, help="Git tag, for example v0.2.0.")
     parser.add_argument(
         "--pyproject",
         type=Path,
