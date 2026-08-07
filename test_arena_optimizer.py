@@ -133,6 +133,16 @@ class OptimizerTests(unittest.TestCase):
         self.assertFalse(metrics.healthy)
         self.assertEqual(metrics.score, float("-inf"))
 
+    def test_repeated_spawn_price_failures_reject_candidate_window(self) -> None:
+        failed = healthy_log(1000).replace(
+            "HARVEST_SUCCEEDED:1",
+            "HARVEST_SUCCEEDED:1,CORE_SPAWN_FAILED/INSUFFICIENT_RESOURCES:1",
+        )
+        metrics = extract_window_metrics(failed)
+
+        self.assertEqual(metrics.insufficient_spawn_failures, 21)
+        self.assertFalse(metrics.healthy)
+
     def test_overlapping_journal_is_trimmed_to_new_ticks(self) -> None:
         overlapping = "\n".join([healthy_log(1000), healthy_log(1600)])
         new_only = _logs_after_tick(overlapping, 1599)

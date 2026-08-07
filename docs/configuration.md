@@ -20,7 +20,7 @@ The main Agent requires only an Arena Hero API key. Configuration precedence is:
 | `--heartbeat-file` | none | Write liveness metadata after each accepted Turn. |
 | `--stale-turn-timeout-seconds` | `0` | Exit with a transient failure after no accepted Turn; `0` disables. |
 
-The supported unattended profile is `--worker-target 12 --beacon-policy retreat`, yielding a maximum planned population of 19.
+The supported unattended profile is `--worker-target 12 --beacon-policy retreat`, yielding `12 Workers + 4 Vanguards + 4 Rangers = 20`. The 20th Unit is still base-priced under gameplay v0.14; normal production stops before the 21st Unit enters dynamic pricing.
 
 Docker Compose enables the stale-Turn timeout at 150 seconds. The systemd unit
 uses 90 seconds, below its 120-second systemd watchdog, so a reconnect loop that

@@ -15,6 +15,7 @@ All notable changes to this project will be documented in this file. The format 
 - Bounded long-range raids against confirmed stationary, unprotected Cores, with strike-distance hysteresis and immediate combat-pressure recall.
 - Gameplay v0.13 and official SDK 0.2.8 compatibility, including conservative Ranger cell fire against a confirmed stationary Core during short visibility gaps.
 - Hierarchical lifecycle and threat assessment with explicit posture/reason diagnostics for alerts, pre-evasion, engagement, multi-axis breakout, recovery, and compatibility hold.
+- Gameplay v0.14 and official SDK 0.2.9 compatibility, including dynamic Unit-price boundary tests and authoritative spawn-cost reconciliation.
 
 ### Changed
 
@@ -24,6 +25,8 @@ All notable changes to this project will be documented in this file. The format 
 - Docker Compose now uses the same graceful `SIGINT` shutdown contract as systemd.
 - Resource targets now use deterministic minimum-cost Worker matching with limited intent stickiness instead of preserving a worse assignment indefinitely.
 - Scout routes prefer less recently covered chunks and rotate after three consecutive non-improving Ticks.
+- The default mature fleet is now `12 Workers + 4 Vanguards + 4 Rangers = 20`, using all base-price slots without automatically entering Unit 21's dynamic-price tier.
+- All production paths use the SDK's current `unit_cost()` preview while preserving operational reserves. Obsolete upkeep diagnostics and alerts are replaced by settled spawn cost, required-price, and repeated affordability-failure telemetry.
 
 ## [0.1.0] - 2026-08-03
 

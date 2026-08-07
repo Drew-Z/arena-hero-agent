@@ -79,7 +79,7 @@ class VersionMonitorTests(unittest.TestCase):
 
     def test_each_reviewed_contract_change_creates_hold(self) -> None:
         changes = (
-            replace(MATCHING_CONTRACT, gameplay="v0.12"),
+            replace(MATCHING_CONTRACT, gameplay="v0.13"),
             replace(MATCHING_CONTRACT, server_commit="a" * 40),
             replace(MATCHING_CONTRACT, sdk_commit="b" * 40),
         )

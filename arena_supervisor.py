@@ -30,6 +30,7 @@ LLM_CORE_MOVING_DEPOSIT_FAILURES = 4
 LLM_COMMAND_FAILURES = 3
 LLM_DELIVERY_BLOCKED_WORKER_TICKS = 12
 LLM_RESOURCE_BLOCKED_WORKER_TICKS = 12
+LLM_SPAWN_FAILURES = 3
 DEFAULT_COMPATIBILITY_MARKER = Path(
     "/var/lib/arena-hero-version/compatibility-hold.json"
 )
@@ -53,10 +54,11 @@ INTEGER_FIELDS = {
     "scout_chunks": re.compile(r"\bscout_chunks=(\d+)"),
     "scout_oldest_age": re.compile(r"\bscout_oldest_age=(\d+)"),
     "projected_core_damage": re.compile(r"\bprojected_core_damage=(\d+)"),
-    "upkeep_due": re.compile(r"\bupkeep_due=(\d+)"),
-    "upkeep_paid": re.compile(r"\bupkeep_paid=(\d+)"),
-    "upkeep_deficit": re.compile(r"\bupkeep_deficit=(\d+)"),
-    "upkeep_damage": re.compile(r"\bupkeep_damage=(\d+)"),
+    "spawn_cost": re.compile(r"\bspawn_cost=(\d+)"),
+    "spawn_required": re.compile(r"\bspawn_required=(\d+)"),
+    "next_worker_cost": re.compile(r"\bnext_worker_cost=(\d+)"),
+    "next_vanguard_cost": re.compile(r"\bnext_vanguard_cost=(\d+)"),
+    "next_ranger_cost": re.compile(r"\bnext_ranger_cost=(\d+)"),
     "core_hp": re.compile(r"\bcore_hp=(\d+)"),
     "core_shield": re.compile(r"\bcore_shield=(\d+)"),
 }
@@ -111,10 +113,11 @@ class Metrics:
     latest_core_survival_margin: int | None = None
     min_core_survival_margin: int | None = None
     critical_core_margin_samples: int = 0
-    latest_upkeep_due: int | None = None
-    latest_upkeep_paid: int | None = None
-    latest_upkeep_deficit: int | None = None
-    latest_upkeep_damage: int | None = None
+    latest_spawn_cost: int | None = None
+    latest_spawn_required: int | None = None
+    latest_next_worker_cost: int | None = None
+    latest_next_vanguard_cost: int | None = None
+    latest_next_ranger_cost: int | None = None
     latest_core_hp: int | None = None
     latest_core_shield: int | None = None
     latest_phase: str | None = None
@@ -131,10 +134,9 @@ class Metrics:
     capture_destroyed: int = 0
     core_healed: int = 0
     unit_healed: int = 0
-    upkeep_deficit_samples: int = 0
-    upkeep_deficit_total: int = 0
-    upkeep_damage_samples: int = 0
-    upkeep_damage_total: int = 0
+    spawn_cost_total: int = 0
+    spawn_required_max: int = 0
+    insufficient_spawn_failures: int = 0
     unexplained_resource_loss: int = 0
     action_counts: dict[str, int] = field(default_factory=dict)
     event_counts: dict[str, int] = field(default_factory=dict)
@@ -353,14 +355,15 @@ def extract_metrics(log_text: str) -> Metrics:
         if unit_healed:
             metrics.unit_healed += int(unit_healed.group(1))
 
-        upkeep_deficit = INTEGER_FIELDS["upkeep_deficit"].search(line)
-        upkeep_damage = INTEGER_FIELDS["upkeep_damage"].search(line)
-        if upkeep_deficit and int(upkeep_deficit.group(1)) > 0:
-            metrics.upkeep_deficit_samples += 1
-            metrics.upkeep_deficit_total += int(upkeep_deficit.group(1))
-        if upkeep_damage and int(upkeep_damage.group(1)) > 0:
-            metrics.upkeep_damage_samples += 1
-            metrics.upkeep_damage_total += int(upkeep_damage.group(1))
+        spawn_cost = INTEGER_FIELDS["spawn_cost"].search(line)
+        spawn_required = INTEGER_FIELDS["spawn_required"].search(line)
+        if spawn_cost:
+            metrics.spawn_cost_total += int(spawn_cost.group(1))
+        if spawn_required:
+            metrics.spawn_required_max = max(
+                metrics.spawn_required_max,
+                int(spawn_required.group(1)),
+            )
 
         core_match = CORE_PATTERN.search(line)
         if core_match:
@@ -388,6 +391,10 @@ def extract_metrics(log_text: str) -> Metrics:
             metrics.last_harvest_tick = tick
         if line_actions.get("DEPOSIT") or line_events.get("DEPOSIT_SUCCEEDED"):
             metrics.last_deposit_tick = tick
+        metrics.insufficient_spawn_failures += line_events.get(
+            "CORE_SPAWN_FAILED/INSUFFICIENT_RESOURCES",
+            0,
+        )
 
     metrics.action_counts = dict(sorted(actions.items()))
     metrics.event_counts = dict(sorted(events.items()))
@@ -609,19 +616,8 @@ def _ticks_since_or_span(last_tick: int | None, metrics: Metrics) -> int:
     return max(0, metrics.latest_tick - last_tick)
 
 
-def _has_upkeep_deficit(metrics: Metrics) -> bool:
-    return bool(
-        metrics.upkeep_deficit_samples
-        or metrics.event_counts.get("UPKEEP_DEFICIT", 0)
-        or metrics.event_counts.get("UNIT_DAMAGED/UPKEEP_DEFICIT", 0)
-    )
-
-
-def _has_upkeep_damage(metrics: Metrics) -> bool:
-    return bool(
-        metrics.upkeep_damage_samples
-        or metrics.event_counts.get("UNIT_DAMAGED/UPKEEP_DEFICIT", 0)
-    )
+def _has_sustained_spawn_failures(metrics: Metrics) -> bool:
+    return metrics.insufficient_spawn_failures >= LLM_SPAWN_FAILURES
 
 
 def assess_deterministic(
@@ -672,16 +668,10 @@ def assess_deterministic(
                 "Core inventory contains a negative delta that resolution events do not explain."
             )
             requires_human = True
-        if _has_upkeep_deficit(metrics):
+        if _has_sustained_spawn_failures(metrics):
             status = "watch"
             signals.append(
-                "The sampled window contains unpaid upkeep that can damage excess Units."
-            )
-            requires_human = True
-        if _has_upkeep_damage(metrics):
-            status = "watch"
-            signals.append(
-                "Excess Units took damage because upkeep could not be paid in full."
+                "Repeated spawns failed because the server required more resources than were available."
             )
             requires_human = True
         if (
@@ -729,10 +719,8 @@ def llm_trigger_reasons(
         reasons.append("core_lifecycle_event")
     if metrics.unexplained_resource_loss > 0:
         reasons.append("unexplained_resource_loss")
-    if _has_upkeep_deficit(metrics):
-        reasons.append("upkeep_deficit")
-    if _has_upkeep_damage(metrics):
-        reasons.append("upkeep_unit_damage")
+    if _has_sustained_spawn_failures(metrics):
+        reasons.append("repeated_spawn_insufficient_resources")
     if metrics.latest_core_hp is not None and metrics.latest_core_hp <= 2:
         reasons.append("critical_core_health")
     if (

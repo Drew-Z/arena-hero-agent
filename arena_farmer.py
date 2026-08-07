@@ -34,6 +34,7 @@ from arena_hero import (
     TransportError,
     Turn,
     UnitType,
+    unit_cost,
 )
 
 API_KEY_ENV = "ARENA_HERO_API_KEY"
@@ -45,18 +46,18 @@ DEFAULT_WORKER_TARGET = 12
 DEFAULT_BEACON_POLICY = "retreat"
 BASE_WORKER_TARGET = 6
 CORE_RESOURCE_RESERVE = 10
-WORKER_EXPANSION_COST = 5
 LATE_EXPANSION_RESERVE = 15
 EARLY_DEFENSE_WORKER_GOAL = 8
 EARLY_DEFENSE_RESERVE = 15
 LONG_TERM_DEFENSE_RESERVE = 15
-VANGUARD_COST = 10
-RANGER_COST = 12
 EARLY_DEFENSE_VANGUARD_TARGET = 1
 EARLY_DEFENSE_RANGER_TARGET = 1
-DEFENSE_VANGUARD_TARGET = 3
+DEFENSE_VANGUARD_TARGET = 4
 DEFENSE_RANGER_TARGET = 4
-MAX_WORKER_TARGET = 19 - DEFENSE_VANGUARD_TARGET - DEFENSE_RANGER_TARGET
+PLANNED_POPULATION_CAP = 20
+MAX_WORKER_TARGET = (
+    PLANNED_POPULATION_CAP - DEFENSE_VANGUARD_TARGET - DEFENSE_RANGER_TARGET
+)
 VANGUARD_GUARD_RADIUS = 3
 RANGER_GUARD_RADIUS = 2
 VANGUARD_CORE_GUARDS = 1
@@ -96,7 +97,10 @@ RECOVERY_TICKS = 160
 RECOVERY_MIN_WORKERS = 6
 RECOVERY_MIN_RESOURCES = 20
 RECOVERY_THREAT_DISTANCE = 12
-RECOVERY_INFERENCE_RESOURCE_LIMIT = CORE_RESOURCE_RESERVE + WORKER_EXPANSION_COST
+RECOVERY_INFERENCE_RESOURCE_LIMIT = CORE_RESOURCE_RESERVE + unit_cost(
+    UnitType.WORKER,
+    0,
+)
 LOG_SNAPSHOT_INTERVAL = 20
 PATH_COST_MAX_EXPANSIONS = 512
 PATH_COST_UNREACHABLE = 1_000_000
@@ -1404,10 +1408,12 @@ def _worker_expansion_threshold(
     worker_count: int,
     worker_target: int,
     resource_capacity: int,
+    population: int,
 ) -> int:
+    next_worker_cost = unit_cost(UnitType.WORKER, population)
     if worker_count < BASE_WORKER_TARGET:
         return min(
-            CORE_RESOURCE_RESERVE + WORKER_EXPANSION_COST,
+            CORE_RESOURCE_RESERVE + next_worker_cost,
             resource_capacity,
         )
 
@@ -1417,7 +1423,11 @@ def _worker_expansion_threshold(
         BASE_WORKER_TARGET + 2 * (completed_late_stages + 1),
     )
     remaining_stage_workers = max(1, stage_target - worker_count)
-    return LATE_EXPANSION_RESERVE + WORKER_EXPANSION_COST * remaining_stage_workers
+    stage_cost = sum(
+        unit_cost(UnitType.WORKER, population + offset)
+        for offset in range(remaining_stage_workers)
+    )
+    return LATE_EXPANSION_RESERVE + stage_cost
 
 
 def _uuid_sort_key(obj: object) -> bytes:
@@ -4055,11 +4065,15 @@ class CoreFarmer:
             core.pickup_beacon()
             return
 
+        population = len(turn.units)
+        worker_cost = unit_cost(UnitType.WORKER, population)
+        vanguard_cost = unit_cost(UnitType.VANGUARD, population)
+        ranger_cost = unit_cost(UnitType.RANGER, population)
         can_spawn = (
             not self.compatibility_hold
             and
             context.friendly_counts[core.position] < 2
-            and len(turn.units) < 19
+            and population < PLANNED_POPULATION_CAP
         )
         nearest_threat = min(
             (
@@ -4133,7 +4147,7 @@ class CoreFarmer:
                 nearest_threat is not None
                 and nearest_threat <= 3
                 and len(turn.vanguards) < DEFENSE_VANGUARD_TARGET
-                and turn.resources >= VANGUARD_COST
+                and turn.resources >= vanguard_cost
             ):
                 core.spawn(UnitType.VANGUARD)
                 return
@@ -4142,7 +4156,7 @@ class CoreFarmer:
                 and nearest_threat <= 6
                 and len(turn.workers) >= 4
                 and len(turn.rangers) < DEFENSE_RANGER_TARGET
-                and turn.resources >= RANGER_COST
+                and turn.resources >= ranger_cost
             ):
                 core.spawn(UnitType.RANGER)
                 return
@@ -4164,7 +4178,7 @@ class CoreFarmer:
                 early_defense_is_safe
                 and len(turn.vanguards) < EARLY_DEFENSE_VANGUARD_TARGET
                 and turn.resources
-                >= EARLY_DEFENSE_RESERVE + VANGUARD_COST
+                >= EARLY_DEFENSE_RESERVE + vanguard_cost
             ):
                 core.spawn(UnitType.VANGUARD)
                 return
@@ -4172,7 +4186,7 @@ class CoreFarmer:
                 early_defense_is_safe
                 and len(turn.vanguards) >= EARLY_DEFENSE_VANGUARD_TARGET
                 and len(turn.rangers) < EARLY_DEFENSE_RANGER_TARGET
-                and turn.resources >= EARLY_DEFENSE_RESERVE + RANGER_COST
+                and turn.resources >= EARLY_DEFENSE_RESERVE + ranger_cost
             ):
                 core.spawn(UnitType.RANGER)
                 return
@@ -4182,12 +4196,13 @@ class CoreFarmer:
                 and len(turn.workers)
                 < min(RECOVERY_MIN_WORKERS, self.worker_target)
             ):
-                expansion_threshold = WORKER_EXPANSION_COST
+                expansion_threshold = worker_cost
             else:
                 expansion_threshold = _worker_expansion_threshold(
                     len(turn.workers),
                     self.worker_target,
                     turn.resource_capacity,
+                    population,
                 )
             economic_expansion_is_safe = (
                 nearest_threat is None or nearest_threat > 6
@@ -4206,7 +4221,7 @@ class CoreFarmer:
                 and turn.resources >= LONG_TERM_DEFENSE_RESERVE
             )
             if mature_for_defense and len(turn.vanguards) < DEFENSE_VANGUARD_TARGET:
-                if turn.resources >= LONG_TERM_DEFENSE_RESERVE + VANGUARD_COST:
+                if turn.resources >= LONG_TERM_DEFENSE_RESERVE + vanguard_cost:
                     core.spawn(UnitType.VANGUARD)
                     return
             if (
@@ -4214,7 +4229,7 @@ class CoreFarmer:
                 and len(turn.vanguards) >= DEFENSE_VANGUARD_TARGET
                 and len(turn.rangers) < DEFENSE_RANGER_TARGET
             ):
-                if turn.resources >= LONG_TERM_DEFENSE_RESERVE + RANGER_COST:
+                if turn.resources >= LONG_TERM_DEFENSE_RESERVE + ranger_cost:
                     core.spawn(UnitType.RANGER)
                     return
 
@@ -4295,8 +4310,6 @@ def _resource_event_effect(event: object) -> int:
     event_type = getattr(event, "event_type", "")
     if event_type in {"DEPOSIT_SUCCEEDED", "CORE_RESOURCES_CAPTURED"}:
         return _event_int(event, "amount")
-    if event_type == "UPKEEP_PAID":
-        return -_event_int(event, "paid")
     if event_type == "CORE_RESOURCE_OVERFLOW_DESTROYED":
         return -_event_int(event, "amount")
     if event_type in {
@@ -4497,18 +4510,21 @@ def _position_diagnostics(turn: Turn, tactic: CoreFarmer) -> str:
         if event.event_type == "UNIT_HEAL_SUCCEEDED"
         and (healing := event.healing) is not None
     )
-    upkeep_events = tuple(
-        event for event in turn.events if event.event_type == "UPKEEP_PAID"
-    )
-    upkeep_due = sum(_event_int(event, "due") for event in upkeep_events)
-    upkeep_paid = sum(_event_int(event, "paid") for event in upkeep_events)
-    upkeep_deficit = sum(_event_int(event, "deficit") for event in upkeep_events)
-    upkeep_damage = sum(
-        _event_int(event, "damage")
+    spawn_cost = sum(
+        _event_int(event, "cost")
         for event in turn.events
-        if event.event_type == "UNIT_DAMAGED"
-        and event.reason_code == "UPKEEP_DEFICIT"
+        if event.event_type == "CORE_SPAWN_SUCCEEDED"
     )
+    spawn_required = max(
+        (
+            _event_int(event, "required")
+            for event in turn.events
+            if event.event_type == "CORE_SPAWN_FAILED"
+            and event.reason_code == "INSUFFICIENT_RESOURCES"
+        ),
+        default=0,
+    )
+    population = len(turn.units)
     enemy_counts = _visible_enemy_counts(turn)
     core_action = plan.get("core_action", {})
     core_action_name = core_action.get("type", "NONE")
@@ -4541,10 +4557,11 @@ def _position_diagnostics(turn: Turn, tactic: CoreFarmer) -> str:
         f"capture_destroyed={capture_destroyed} "
         f"core_healed={core_healed} "
         f"unit_healed={unit_healed} "
-        f"upkeep_due={upkeep_due} "
-        f"upkeep_paid={upkeep_paid} "
-        f"upkeep_deficit={upkeep_deficit} "
-        f"upkeep_damage={upkeep_damage} "
+        f"spawn_cost={spawn_cost} "
+        f"spawn_required={spawn_required} "
+        f"next_worker_cost={unit_cost(UnitType.WORKER, population)} "
+        f"next_vanguard_cost={unit_cost(UnitType.VANGUARD, population)} "
+        f"next_ranger_cost={unit_cost(UnitType.RANGER, population)} "
         f"visible_enemies={len(turn.visible_enemies)} "
         f"enemy_types={_format_counts(enemy_counts)} "
         f"global_posture={tactic.threat_assessment.global_posture.value} "

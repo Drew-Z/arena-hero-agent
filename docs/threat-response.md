@@ -12,7 +12,8 @@ it does not call a language model or rewrite itself while the game is live.
 4. A hostile position from an old Turn is memory, not current truth.
 5. Movement and attack are mutually exclusive Unit actions. An enemy cannot move
    and attack in the same Tick.
-6. Population remains at or below 19.
+6. Normal production stops at the 20-Unit base-price fleet. Dynamic-price
+   expansion beyond 20 requires an explicit, tested strategy change.
 7. No raid continues through local combat pressure merely because the original
    target still exists.
 

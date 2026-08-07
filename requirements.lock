@@ -8,9 +8,9 @@ anyio==4.14.2 \
     --hash=sha256:9f505dda5ac9f0c8309b5e8bd445a8c2bf7246f3ce950121e45ea15bc41d1494 \
     --hash=sha256:cfa139f3ed1a23ee8f88a145ddb5ac7605b8bbfd8592baacd7ce3d8bb4313c7f
     # via httpx
-arena-hero==0.2.8 \
-    --hash=sha256:abfff2090886b9ad8bd8c37b04150a7d21559f4a792434948250de76162ee008 \
-    --hash=sha256:f3c08411c2b5554492dc1b4d91e69a63014a9a0d900e2758a498f9e8b3fc547e
+arena-hero==0.2.9 \
+    --hash=sha256:620c5fbd5a7dd1d5c32c145ee8f3f184538d0a7c08ee69e7eda34459916db8d1 \
+    --hash=sha256:822e4de0999e8f26e8c8beb910c786513fcc5be6e426175d9b5e2e3e32b899d9
     # via arena-hero-agent (pyproject.toml)
 certifi==2026.7.22 \
     --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775 \

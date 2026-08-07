@@ -170,8 +170,8 @@ class SupervisorTests(unittest.TestCase):
                     "beacon_distance=200 known_resources=4 danger_cells=1 "
                     "combat_pressure=1 resource_blocked=12 scout_chunks=7 "
                     "scout_oldest_age=31 projected_core_damage=2 "
-                    "core_survival_margin=3 upkeep_due=1 upkeep_paid=1 "
-                    "upkeep_deficit=0 upkeep_damage=0 "
+                    "core_survival_margin=3 spawn_cost=16 spawn_required=0 "
+                    "next_worker_cost=7 next_vanguard_cost=13 next_ranger_cost=16 "
                     "phase=STOCKPILE core_hp=5 core_shield=4"
                 ),
                 "WARNING tick=33447 manual_override unit_actions=1 core_actions=0",
@@ -202,12 +202,13 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(metrics.latest_core_survival_margin, 3)
         self.assertEqual(metrics.min_core_survival_margin, 3)
         self.assertEqual(metrics.critical_core_margin_samples, 0)
-        self.assertEqual(metrics.latest_upkeep_due, 1)
-        self.assertEqual(metrics.latest_upkeep_paid, 1)
-        self.assertEqual(metrics.latest_upkeep_deficit, 0)
-        self.assertEqual(metrics.latest_upkeep_damage, 0)
-        self.assertEqual(metrics.upkeep_deficit_samples, 0)
-        self.assertEqual(metrics.upkeep_damage_samples, 0)
+        self.assertEqual(metrics.latest_spawn_cost, 16)
+        self.assertEqual(metrics.latest_spawn_required, 0)
+        self.assertEqual(metrics.latest_next_worker_cost, 7)
+        self.assertEqual(metrics.latest_next_vanguard_cost, 13)
+        self.assertEqual(metrics.latest_next_ranger_cost, 16)
+        self.assertEqual(metrics.spawn_cost_total, 16)
+        self.assertEqual(metrics.insufficient_spawn_failures, 0)
         self.assertEqual(metrics.last_harvest_tick, 33446)
         self.assertEqual(metrics.ticks_since_harvest, 0)
         self.assertEqual(metrics.action_counts, {"HARVEST": 2, "MOVE": 6})
@@ -416,11 +417,12 @@ class SupervisorTests(unittest.TestCase):
         self.assertTrue(assessment.requires_human)
         self.assertIn("unexplained_resource_loss", reasons)
 
-    def test_upkeep_deficit_triggers_watch_and_model_review(self) -> None:
+    def test_repeated_spawn_price_failures_trigger_watch_and_model_review(self) -> None:
         snapshot = JournalSnapshot(
             "tick=101 accepted=True resources=0/100 workers=12 "
-            "vanguards=4 rangers=4 events=UNIT_DAMAGED/UPKEEP_DEFICIT:1,UPKEEP_PAID:1 "
-            "upkeep_due=1 upkeep_paid=0 upkeep_deficit=1 upkeep_damage=1",
+            "vanguards=4 rangers=4 events=CORE_SPAWN_FAILED/INSUFFICIENT_RESOURCES:3 "
+            "spawn_cost=0 spawn_required=16 next_worker_cost=7 "
+            "next_vanguard_cost=13 next_ranger_cost=16",
             180,
             False,
         )
@@ -429,20 +431,18 @@ class SupervisorTests(unittest.TestCase):
         assessment = assess_deterministic(snapshot, metrics, {"hold": False})
         reasons = llm_trigger_reasons(snapshot, metrics, {"hold": False})
 
-        self.assertEqual(metrics.upkeep_deficit_samples, 1)
-        self.assertEqual(metrics.upkeep_deficit_total, 1)
-        self.assertEqual(metrics.upkeep_damage_samples, 1)
-        self.assertEqual(metrics.upkeep_damage_total, 1)
+        self.assertEqual(metrics.insufficient_spawn_failures, 3)
+        self.assertEqual(metrics.spawn_required_max, 16)
         self.assertEqual(assessment.status, "watch")
         self.assertTrue(assessment.requires_human)
-        self.assertIn("upkeep_deficit", reasons)
-        self.assertIn("upkeep_unit_damage", reasons)
+        self.assertIn("repeated_spawn_insufficient_resources", reasons)
 
-    def test_fully_paid_upkeep_does_not_trigger_review(self) -> None:
+    def test_single_spawn_price_failure_does_not_trigger_review(self) -> None:
         snapshot = JournalSnapshot(
             "tick=101 accepted=True resources=9/100 workers=12 "
-            "vanguards=4 rangers=4 events=UPKEEP_PAID:1 "
-            "upkeep_due=1 upkeep_paid=1 upkeep_deficit=0 upkeep_damage=0",
+            "vanguards=4 rangers=4 events=CORE_SPAWN_FAILED/INSUFFICIENT_RESOURCES:1 "
+            "spawn_cost=0 spawn_required=16 next_worker_cost=7 "
+            "next_vanguard_cost=13 next_ranger_cost=16",
             150,
             False,
         )
@@ -451,8 +451,7 @@ class SupervisorTests(unittest.TestCase):
         assessment = assess_deterministic(snapshot, metrics, {"hold": False})
         reasons = llm_trigger_reasons(snapshot, metrics, {"hold": False})
 
-        self.assertEqual(metrics.upkeep_deficit_samples, 0)
-        self.assertEqual(metrics.upkeep_damage_samples, 0)
+        self.assertEqual(metrics.insufficient_spawn_failures, 1)
         self.assertEqual(assessment.status, "healthy")
         self.assertFalse(assessment.requires_human)
         self.assertEqual(reasons, ())

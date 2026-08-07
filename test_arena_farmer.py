@@ -11,7 +11,16 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import UUID
 
-from arena_hero import Accepted, CommandPlan, Direction, PlayerState, Received, Turn
+from arena_hero import (
+    Accepted,
+    CommandPlan,
+    Direction,
+    PlayerState,
+    Received,
+    Turn,
+    UnitType,
+    unit_cost,
+)
 
 from arena_farmer import (
     CoreFarmer,
@@ -54,6 +63,7 @@ RANGER_1 = "00000000-0000-4000-8000-000000000005"
 VANGUARD_2 = "00000000-0000-4000-8000-000000000010"
 RANGER_2 = "00000000-0000-4000-8000-000000000011"
 VANGUARD_3 = "00000000-0000-4000-8000-000000000012"
+VANGUARD_4 = "00000000-0000-4000-8000-000000000015"
 RANGER_3 = "00000000-0000-4000-8000-000000000013"
 RANGER_4 = "00000000-0000-4000-8000-000000000014"
 ENEMY_1 = "10000000-0000-4000-8000-000000000001"
@@ -160,8 +170,6 @@ def make_turn(
             "respawn_at_tick": None if core else tick + 10,
             "resources": resources,
             "population": len(units or []),
-            "population_tier": 0,
-            "upkeep_next_tick": 0,
             "champion_beacon": beacon,
             "objects": objects,
             "events": events or [],
@@ -205,7 +213,7 @@ class ResourceLedgerTests(unittest.TestCase):
     def test_spawn_cost_reconciles_negative_resource_delta(self) -> None:
         turn = make_turn(
             tick=101,
-            resources=19,
+            resources=15,
             units=[unit(RANGER_4, "RANGER", (0, 0))],
             events=[
                 {
@@ -215,15 +223,15 @@ class ResourceLedgerTests(unittest.TestCase):
                     "actor_id": CORE_ID,
                     "target_id": RANGER_4,
                     "position": [0, 0],
-                    "values": {"unit_type": "RANGER", "cost": 12},
+                    "values": {"unit_type": "RANGER", "cost": 16},
                 }
             ],
         )
 
         result = _reconcile_resource_turn(self._snapshot(), turn)
 
-        self.assertEqual(result.actual_delta, -12)
-        self.assertEqual(result.expected_delta, -12)
+        self.assertEqual(result.actual_delta, -16)
+        self.assertEqual(result.expected_delta, -16)
         self.assertEqual(result.unexplained_loss, 0)
 
     def test_unexplained_negative_delta_emits_structured_warning(self) -> None:
@@ -248,6 +256,31 @@ class ResourceLedgerTests(unittest.TestCase):
 
         self.assertEqual(result.skipped_reason, "tick_gap")
         self.assertEqual(result.unexplained_loss, 0)
+
+
+class DynamicPricingTests(unittest.TestCase):
+    def test_v014_unit_cost_boundaries(self) -> None:
+        expected = {
+            19: (5, 10, 12),
+            20: (7, 13, 16),
+            24: (7, 13, 16),
+            25: (8, 17, 20),
+            29: (8, 17, 20),
+            30: (11, 22, 26),
+        }
+        for population, prices in expected.items():
+            with self.subTest(population=population):
+                self.assertEqual(
+                    tuple(
+                        unit_cost(unit_type, population)
+                        for unit_type in (
+                            UnitType.WORKER,
+                            UnitType.VANGUARD,
+                            UnitType.RANGER,
+                        )
+                    ),
+                    prices,
+                )
 
 
 class CoreFarmerTests(unittest.TestCase):
@@ -2886,7 +2919,7 @@ class CoreFarmerTests(unittest.TestCase):
 
         self.assertIsNone(tactic.isolated_core_target_id)
 
-    def test_capture_and_healing_results_are_logged_structurally(self) -> None:
+    def test_capture_healing_and_spawn_prices_are_logged_structurally(self) -> None:
         turn = make_turn(
             resources=15,
             events=[
@@ -2910,15 +2943,15 @@ class CoreFarmerTests(unittest.TestCase):
                 {
                     "event_id": "20000000-0000-4000-8000-000000000022",
                     "tick": 8,
-                    "event_type": "UPKEEP_PAID",
-                    "values": {"due": 1, "paid": 0, "deficit": 1},
+                    "event_type": "CORE_SPAWN_SUCCEEDED",
+                    "values": {"unit_type": "RANGER", "cost": 16},
                 },
                 {
                     "event_id": "20000000-0000-4000-8000-000000000023",
                     "tick": 8,
-                    "event_type": "UNIT_DAMAGED",
-                    "reason_code": "UPKEEP_DEFICIT",
-                    "values": {"damage": 1, "hp": 1},
+                    "event_type": "CORE_SPAWN_FAILED",
+                    "reason_code": "INSUFFICIENT_RESOURCES",
+                    "values": {"required": 16},
                 },
             ],
         )
@@ -2929,10 +2962,11 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertIn("captured_resources=7", diagnostics)
         self.assertIn("capture_destroyed=2", diagnostics)
         self.assertIn("core_healed=2", diagnostics)
-        self.assertIn("upkeep_due=1", diagnostics)
-        self.assertIn("upkeep_paid=0", diagnostics)
-        self.assertIn("upkeep_deficit=1", diagnostics)
-        self.assertIn("upkeep_damage=1", diagnostics)
+        self.assertIn("spawn_cost=16", diagnostics)
+        self.assertIn("spawn_required=16", diagnostics)
+        self.assertIn("next_worker_cost=5", diagnostics)
+        self.assertIn("next_vanguard_cost=10", diagnostics)
+        self.assertIn("next_ranger_cost=12", diagnostics)
         self.assertIn("projected_core_damage=0", diagnostics)
         self.assertIn("core_survival_margin=5", diagnostics)
         self.assertIn("global_posture=NORMAL", diagnostics)
@@ -3020,12 +3054,12 @@ class CoreFarmerTests(unittest.TestCase):
         tactic.choose_actions(reacquired)
         self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
 
-    def test_worker_limit_reserves_seven_defense_slots(self) -> None:
+    def test_worker_limit_reserves_eight_defense_slots(self) -> None:
         CoreFarmer(worker_target=12)
         with self.assertRaisesRegex(ValueError, "between 1 and 12"):
             CoreFarmer(worker_target=13)
 
-    def test_population_hard_stops_at_19_without_self_destruct(self) -> None:
+    def test_population_hard_stops_at_20_without_self_destruct(self) -> None:
         units = [
             unit(
                 f"20000000-0000-4000-8000-{index:012x}",
@@ -3033,13 +3067,13 @@ class CoreFarmerTests(unittest.TestCase):
                     "WORKER"
                     if index < 12
                     else "VANGUARD"
-                    if index < 15
+                    if index < 16
                     else "RANGER"
                 ),
                 (20 + index, 20),
                 cargo=0 if index < 12 else None,
             )
-            for index in range(19)
+            for index in range(20)
         ]
         turn = make_turn(resources=95, units=units)
         tactic = CoreFarmer(worker_target=12, beacon_policy="hold")
@@ -3056,6 +3090,55 @@ class CoreFarmerTests(unittest.TestCase):
                 for action in queued.get("unit_actions", {}).values()
             )
         )
+
+    def test_nineteen_units_build_fourth_vanguard_at_base_price(self) -> None:
+        units = [
+            unit(
+                f"20000000-0000-4000-8000-{index:012x}",
+                (
+                    "WORKER"
+                    if index < 12
+                    else "VANGUARD"
+                    if index < 15
+                    else "RANGER"
+                ),
+                (20 + index, 20),
+                cargo=0 if index < 12 else None,
+            )
+            for index in range(19)
+        ]
+        queued = plan(make_turn(resources=25, units=units), beacon_policy="hold")
+
+        self.assertEqual(queued["core_action"]["type"], "SPAWN")
+        self.assertEqual(queued["core_action"]["unit_type"], "VANGUARD")
+
+    def test_emergency_defenders_use_dynamic_price_preview(self) -> None:
+        vanguard_turn = dict(
+            units=[unit(WORKER_1, "WORKER", (1, 0), cargo=0)],
+            enemies=[unit(ENEMY_1, "VANGUARD", (2, 0), controlled=False)],
+            obstacles=[(-1, 0), (0, -1), (0, 1)],
+        )
+        ranger_turn = dict(
+            units=self._workers(4),
+            enemies=[unit(ENEMY_1, "RANGER", (5, 0), controlled=False)],
+            obstacles=[(-1, 0), (1, 0), (0, -1), (0, 1)],
+        )
+        with patch("arena_farmer.unit_cost", return_value=30):
+            vanguard_wait = plan(make_turn(resources=29, **vanguard_turn))
+            vanguard_spawn = plan(make_turn(resources=30, **vanguard_turn))
+            ranger_wait = plan(make_turn(resources=29, **ranger_turn))
+            ranger_spawn = plan(make_turn(resources=30, **ranger_turn))
+
+        self.assertNotEqual(
+            vanguard_wait.get("core_action", {}).get("type"),
+            "SPAWN",
+        )
+        self.assertEqual(vanguard_spawn["core_action"]["unit_type"], "VANGUARD")
+        self.assertNotEqual(
+            ranger_wait.get("core_action", {}).get("type"),
+            "SPAWN",
+        )
+        self.assertEqual(ranger_spawn["core_action"]["unit_type"], "RANGER")
 
     def test_four_workers_accumulate_before_expanding_to_six(self) -> None:
         workers = [
@@ -3116,6 +3199,38 @@ class CoreFarmerTests(unittest.TestCase):
         )
         self.assertEqual(resumed_expansion["core_action"]["unit_type"], "WORKER")
 
+    def test_early_defense_uses_dynamic_price_preview(self) -> None:
+        workers = self._workers(8)
+        vanguard = unit(VANGUARD_1, "VANGUARD", (3, 0))
+        prices = {
+            UnitType.WORKER: 30,
+            UnitType.VANGUARD: 40,
+            UnitType.RANGER: 50,
+        }
+        with patch(
+            "arena_farmer.unit_cost",
+            side_effect=lambda kind, _population: prices[kind],
+        ):
+            vanguard_wait = plan(make_turn(resources=54, units=workers))
+            vanguard_spawn = plan(make_turn(resources=55, units=workers))
+            ranger_wait = plan(
+                make_turn(resources=64, units=workers + [vanguard])
+            )
+            ranger_spawn = plan(
+                make_turn(resources=65, units=workers + [vanguard])
+            )
+
+        self.assertNotEqual(
+            vanguard_wait.get("core_action", {}).get("type"),
+            "SPAWN",
+        )
+        self.assertEqual(vanguard_spawn["core_action"]["unit_type"], "VANGUARD")
+        self.assertNotEqual(
+            ranger_wait.get("core_action", {}).get("type"),
+            "SPAWN",
+        )
+        self.assertEqual(ranger_spawn["core_action"]["unit_type"], "RANGER")
+
     def test_mature_fleet_keeps_15_resource_defense_reserve(self) -> None:
         workers = self._workers(12)
         early_fleet = [
@@ -3132,11 +3247,12 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertEqual(expanding["core_action"]["type"], "SPAWN")
         self.assertEqual(expanding["core_action"]["unit_type"], "VANGUARD")
 
-    def test_mature_fleet_builds_three_vanguards_before_four_rangers(self) -> None:
+    def test_mature_fleet_builds_four_vanguards_before_four_rangers(self) -> None:
         workers = self._workers(12)
         first_vanguard = unit(VANGUARD_1, "VANGUARD", (3, 0))
         second_vanguard = unit(VANGUARD_2, "VANGUARD", (4, 0))
         third_vanguard = unit(VANGUARD_3, "VANGUARD", (4, 1))
+        fourth_vanguard = unit(VANGUARD_4, "VANGUARD", (5, 1))
         first_ranger = unit(RANGER_1, "RANGER", (5, 0))
 
         second_vanguard_plan = plan(
@@ -3159,14 +3275,89 @@ class CoreFarmerTests(unittest.TestCase):
         )
         self.assertEqual(third_vanguard_plan["core_action"]["unit_type"], "VANGUARD")
 
+        fourth_vanguard_plan = plan(
+            make_turn(
+                resources=25,
+                units=workers
+                + [
+                    first_vanguard,
+                    second_vanguard,
+                    third_vanguard,
+                    first_ranger,
+                ],
+            )
+        )
+        self.assertEqual(
+            fourth_vanguard_plan["core_action"]["unit_type"],
+            "VANGUARD",
+        )
+
         second_ranger_plan = plan(
             make_turn(
                 resources=27,
                 units=workers
-                + [first_vanguard, second_vanguard, third_vanguard, first_ranger],
+                + [
+                    first_vanguard,
+                    second_vanguard,
+                    third_vanguard,
+                    fourth_vanguard,
+                    first_ranger,
+                ],
             )
         )
         self.assertEqual(second_ranger_plan["core_action"]["unit_type"], "RANGER")
+
+    def test_mature_defense_uses_dynamic_price_preview(self) -> None:
+        workers = self._workers(12)
+        fleet = [
+            unit(VANGUARD_1, "VANGUARD", (3, 0)),
+            unit(VANGUARD_2, "VANGUARD", (4, 0)),
+            unit(VANGUARD_3, "VANGUARD", (5, 0)),
+            unit(RANGER_1, "RANGER", (6, 0)),
+            unit(RANGER_2, "RANGER", (7, 0)),
+            unit(RANGER_3, "RANGER", (8, 0)),
+            unit(RANGER_4, "RANGER", (9, 0)),
+        ]
+        with patch("arena_farmer.unit_cost", return_value=30):
+            accumulating = plan(
+                make_turn(resources=44, units=workers + fleet),
+                beacon_policy="hold",
+            )
+            spawning = plan(
+                make_turn(resources=45, units=workers + fleet),
+                beacon_policy="hold",
+            )
+
+        self.assertNotEqual(
+            accumulating.get("core_action", {}).get("type"),
+            "SPAWN",
+        )
+        self.assertEqual(spawning["core_action"]["unit_type"], "VANGUARD")
+
+        four_vanguards = fleet[:3] + [
+            unit(VANGUARD_4, "VANGUARD", (5, 1)),
+        ]
+        with patch("arena_farmer.unit_cost", return_value=30):
+            ranger_wait = plan(
+                make_turn(
+                    resources=44,
+                    units=workers + four_vanguards + fleet[3:4],
+                ),
+                beacon_policy="hold",
+            )
+            ranger_spawn = plan(
+                make_turn(
+                    resources=45,
+                    units=workers + four_vanguards + fleet[3:4],
+                ),
+                beacon_policy="hold",
+            )
+
+        self.assertNotEqual(
+            ranger_wait.get("core_action", {}).get("type"),
+            "SPAWN",
+        )
+        self.assertEqual(ranger_spawn["core_action"]["unit_type"], "RANGER")
 
     def test_defense_fleet_leaves_core_spawn_cell(self) -> None:
         workers = [
@@ -3476,6 +3667,31 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertEqual(tactic.threat_assessment.level, ThreatLevel.NORMAL)
         self.assertEqual(queued["core_action"]["type"], "SPAWN")
         self.assertEqual(queued["core_action"]["unit_type"], "WORKER")
+
+    def test_recovery_worker_uses_dynamic_price_preview(self) -> None:
+        event = {
+            "event_id": "20000000-0000-4000-8000-000000000030",
+            "tick": 99,
+            "event_type": "CORE_RESPAWNED",
+            "actor_id": CORE_ID,
+            "position": [-100, -100],
+        }
+        turn_fields = dict(
+            tick=100,
+            core_position=(-100, -100),
+            beacon_position=(0, 0),
+            units=[unit(WORKER_1, "WORKER", (-100, -100), cargo=0)],
+            events=[event],
+        )
+        with patch("arena_farmer.unit_cost", return_value=30):
+            waiting = plan(make_turn(resources=29, **turn_fields))
+            spawning = plan(make_turn(resources=30, **turn_fields))
+
+        self.assertNotEqual(
+            waiting.get("core_action", {}).get("type"),
+            "SPAWN",
+        )
+        self.assertEqual(spawning["core_action"]["unit_type"], "WORKER")
 
     def test_activity_alert_survives_two_complete_hidden_ticks(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")

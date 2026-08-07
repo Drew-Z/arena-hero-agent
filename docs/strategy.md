@@ -9,17 +9,20 @@ The mature target is:
 | Unit | Target | Role |
 | --- | ---: | --- |
 | Worker | 12 | Harvest, deposit, scout, observe, and recover dropped cargo. |
-| Vanguard | 3 | Outer screen, route screening, and bounded assault reinforcement. |
+| Vanguard | 4 | Outer screen, route screening, durable Core defense, and bounded assault reinforcement. |
 | Ranger | 4 | Inner Core defense and ranged stationary-target clearing. |
-| Total | 19 | Remains below the 20-population resource penalty. |
+| Total | 20 | Uses every base-price slot; the 21st Unit is the first dynamically priced spawn. |
 
-Production reserves resources between stages and does not build beyond the configured Worker target and defense targets.
+Gameplay v0.14 has no per-Tick upkeep or maintenance damage. Production still
+reserves resources for healing, shield repair, and emergency replacement. Every
+spawn branch previews the current price with the official SDK's `unit_cost()`;
+the settled `CORE_SPAWN_SUCCEEDED.values.cost` remains authoritative. The
+normal profile does not build Unit 21 or later automatically.
 
-The proposed `15 Worker + 2 Vanguard + 2 Ranger` profile also stays at 19, but
-it removes one Vanguard and two Rangers from the current survival envelope. It
-remains an A/B-test candidate rather than the default until collection
-throughput, unit loss, Core damage, healing cost, and unattended survival can be
-compared over equivalent windows.
+At a pre-spawn population of 20, prices rise to Worker 7, Vanguard 13, and
+Ranger 16. Higher tiers continue compounding every five population. Expansion
+beyond 20 therefore requires a separate, measured strategy change rather than
+being inferred from a temporary resource surplus.
 
 ## Core Safety
 
@@ -61,13 +64,13 @@ compared over equivalent windows.
   or imminent cargo delivery pauses the return.
 - Confirmed stationary units can be cleared by a small bounded strike group while guards remain with the Core, but only outside combat pressure.
 - A stationary Core is considered for a raid only after repeated observations and isolation checks. The Worker that exposed it may remain as the designated observer. The default strike group can engage from at most 48 path-independent Manhattan cells and releases a target if pulled beyond 56, while one Vanguard and one Ranger remain as Core guards.
-- Under gameplay v0.13, Rangers use target-free cell fire for legal defensive shots so another hostile remaining in the submitted cell can still be hit. A strike Ranger may also fire at the remembered cell of a confirmed stationary Core during a short visibility gap.
+- Under gameplay v0.14, Rangers use target-free cell fire for legal defensive shots so another hostile remaining in the submitted cell can still be hit. A strike Ranger may also fire at the remembered cell of a confirmed stationary Core during a short visibility gap.
 - Loss of visibility does not immediately invalidate stationary-target memory, but moving escorts, contradictory observations, age, and risk reduce confidence.
 - Loot events, storage capacity, same-Tick Core survival, and return-path cost determine whether a kill was economically useful.
 
 ## Current Optimization Priority
 
-The strategy currently has focused unit tests and structured diagnostics for economy stalls, blocking, Core survival, scouting coverage, combat pressure, lifecycle events, and unexplained resource loss. New tuning should be driven by a captured unhealthy window rather than by increasing fleet size or adding a model to the Tick loop.
+The strategy currently has focused unit tests and structured diagnostics for economy stalls, blocking, Core survival, scouting coverage, combat pressure, lifecycle events, dynamic spawn prices, repeated affordability failures, and unexplained resource loss. New tuning should be driven by a captured unhealthy window rather than by increasing fleet size or adding a model to the Tick loop.
 
 The first hierarchical-controller stage is implemented: every planned Turn now
 records `global_posture`, `threat_level`, and a deterministic `threat_reason`.

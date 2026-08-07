@@ -84,6 +84,7 @@ class WindowMetrics:
     captured_resources: int = 0
     core_healed: int = 0
     unit_healed: int = 0
+    insufficient_spawn_failures: int = 0
 
     @property
     def healthy(self) -> bool:
@@ -112,6 +113,8 @@ class WindowMetrics:
             return False
         if self.resource_blocked_workers > max(6, self.sampled_turns // 5):
             return False
+        if self.insufficient_spawn_failures >= 3:
+            return False
         return not (
             self.core_destroyed
             or self.respawns
@@ -134,6 +137,9 @@ class WindowMetrics:
             1, self.sampled_turns
         )
         delivery_penalty += self.resource_blocked_workers * 0.5 / max(
+            1, self.sampled_turns
+        )
+        delivery_penalty += self.insufficient_spawn_failures / max(
             1, self.sampled_turns
         )
         return (
@@ -329,6 +335,10 @@ def extract_window_metrics(log_text: str) -> WindowMetrics:
             metrics.harvests += counts.get("HARVEST_SUCCEEDED", 0)
             metrics.core_destroyed += counts.get("CORE_DESTROYED", 0)
             metrics.respawns += counts.get("CORE_RESPAWNED", 0)
+            metrics.insufficient_spawn_failures += counts.get(
+                "CORE_SPAWN_FAILED/INSUFFICIENT_RESOURCES",
+                0,
+            )
         recovery = re.search(r"\brecovery=(\d+)", line)
         if recovery and recovery.group(1) != "0":
             metrics.recovery_samples += 1
