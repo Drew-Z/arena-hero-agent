@@ -299,6 +299,9 @@ class CoreFarmerTests(unittest.TestCase):
             WORKER_10,
             WORKER_11,
             WORKER_12,
+        ] + [
+            f"20000000-0000-4000-8000-{index:012x}"
+            for index in range(16, 27)
         ]
         positions = [
             (1, 0),
@@ -314,6 +317,7 @@ class CoreFarmerTests(unittest.TestCase):
             (-2, -1),
             (-1, -2),
         ]
+        positions.extend((index, 3) for index in range(7, 18))
         return [
             unit(identifier, "WORKER", position, cargo=cargo)
             for identifier, position in zip(
@@ -2093,6 +2097,26 @@ class CoreFarmerTests(unittest.TestCase):
         second_plan = depositing.plan.model_dump(mode="json", exclude_none=True)
         self.assertEqual(second_plan["unit_actions"][WORKER_2]["type"], "DEPOSIT")
 
+    def test_full_core_cargo_handoff_clears_spawn_lane(self) -> None:
+        queued = plan(
+            make_turn(
+                resources=25,
+                units=[
+                    unit(WORKER_1, "WORKER", (0, 0), cargo=1),
+                    unit(WORKER_2, "WORKER", (1, 0), cargo=1),
+                    unit(WORKER_3, "WORKER", (1, 0), cargo=1),
+                    unit(WORKER_4, "WORKER", (-1, 0), cargo=1),
+                    unit(WORKER_5, "WORKER", (-1, 0), cargo=1),
+                ],
+                obstacles=[(0, -1), (0, 1)],
+            ),
+            beacon_policy="hold",
+        )
+
+        self.assertEqual(queued["unit_actions"][WORKER_1]["type"], "MOVE")
+        self.assertEqual(queued["core_action"]["type"], "SPAWN")
+        self.assertEqual(queued["core_action"]["unit_type"], "WORKER")
+
     def test_visible_enemy_worker_does_not_disable_safe_delivery_handoff(self) -> None:
         queued = plan(
             make_turn(
@@ -3054,29 +3078,29 @@ class CoreFarmerTests(unittest.TestCase):
         tactic.choose_actions(reacquired)
         self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
 
-    def test_worker_limit_reserves_eight_defense_slots(self) -> None:
-        CoreFarmer(worker_target=12)
-        with self.assertRaisesRegex(ValueError, "between 1 and 12"):
-            CoreFarmer(worker_target=13)
+    def test_worker_limit_reserves_seven_defense_slots(self) -> None:
+        CoreFarmer(worker_target=23)
+        with self.assertRaisesRegex(ValueError, "between 1 and 23"):
+            CoreFarmer(worker_target=24)
 
-    def test_population_hard_stops_at_20_without_self_destruct(self) -> None:
+    def test_population_hard_stops_at_30_without_self_destruct(self) -> None:
         units = [
             unit(
                 f"20000000-0000-4000-8000-{index:012x}",
                 (
                     "WORKER"
-                    if index < 12
+                    if index < 23
                     else "VANGUARD"
-                    if index < 16
+                    if index < 26
                     else "RANGER"
                 ),
                 (20 + index, 20),
-                cargo=0 if index < 12 else None,
+                cargo=0 if index < 23 else None,
             )
-            for index in range(20)
+            for index in range(30)
         ]
-        turn = make_turn(resources=95, units=units)
-        tactic = CoreFarmer(worker_target=12, beacon_policy="hold")
+        turn = make_turn(resources=200, units=units)
+        tactic = CoreFarmer(worker_target=23, beacon_policy="hold")
         tactic.choose_actions(turn)
         queued = turn.plan.model_dump(mode="json", exclude_none=True)
 
@@ -3091,26 +3115,44 @@ class CoreFarmerTests(unittest.TestCase):
             )
         )
 
-    def test_nineteen_units_build_fourth_vanguard_at_base_price(self) -> None:
-        units = [
-            unit(
-                f"20000000-0000-4000-8000-{index:012x}",
-                (
-                    "WORKER"
-                    if index < 12
-                    else "VANGUARD"
-                    if index < 15
-                    else "RANGER"
-                ),
-                (20 + index, 20),
-                cargo=0 if index < 12 else None,
-            )
-            for index in range(19)
+    def test_dynamic_worker_price_stages(self) -> None:
+        fleet = [
+            unit(VANGUARD_1, "VANGUARD", (3, 0)),
+            unit(VANGUARD_2, "VANGUARD", (4, 0)),
+            unit(VANGUARD_3, "VANGUARD", (4, 1)),
+            unit(RANGER_1, "RANGER", (5, 0)),
+            unit(RANGER_2, "RANGER", (5, 1)),
+            unit(RANGER_3, "RANGER", (5, 2)),
+            unit(RANGER_4, "RANGER", (5, 3)),
         ]
-        queued = plan(make_turn(resources=25, units=units), beacon_policy="hold")
-
-        self.assertEqual(queued["core_action"]["type"], "SPAWN")
-        self.assertEqual(queued["core_action"]["unit_type"], "VANGUARD")
+        cases = (
+            (12, 19, 19, 20),
+            (13, 20, 42, 43),
+            (17, 24, 53, 54),
+            (22, 29, 22, 23),
+        )
+        for workers_count, population, blocked, expanding in cases:
+            with self.subTest(population=population):
+                blocked_turn = make_turn(
+                    resources=blocked,
+                    units=self._workers(workers_count) + fleet,
+                )
+                self.assertNotEqual(
+                    plan(blocked_turn, beacon_policy="hold")
+                    .get("core_action", {})
+                    .get("unit_type"),
+                    "WORKER",
+                )
+                expanding_turn = make_turn(
+                    resources=expanding,
+                    units=self._workers(workers_count) + fleet,
+                )
+                self.assertEqual(
+                    plan(expanding_turn, beacon_policy="hold")["core_action"][
+                        "unit_type"
+                    ],
+                    "WORKER",
+                )
 
     def test_emergency_defenders_use_dynamic_price_preview(self) -> None:
         vanguard_turn = dict(
@@ -3247,12 +3289,11 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertEqual(expanding["core_action"]["type"], "SPAWN")
         self.assertEqual(expanding["core_action"]["unit_type"], "VANGUARD")
 
-    def test_mature_fleet_builds_four_vanguards_before_four_rangers(self) -> None:
+    def test_mature_fleet_builds_three_vanguards_before_four_rangers(self) -> None:
         workers = self._workers(12)
         first_vanguard = unit(VANGUARD_1, "VANGUARD", (3, 0))
         second_vanguard = unit(VANGUARD_2, "VANGUARD", (4, 0))
         third_vanguard = unit(VANGUARD_3, "VANGUARD", (4, 1))
-        fourth_vanguard = unit(VANGUARD_4, "VANGUARD", (5, 1))
         first_ranger = unit(RANGER_1, "RANGER", (5, 0))
 
         second_vanguard_plan = plan(
@@ -3275,23 +3316,6 @@ class CoreFarmerTests(unittest.TestCase):
         )
         self.assertEqual(third_vanguard_plan["core_action"]["unit_type"], "VANGUARD")
 
-        fourth_vanguard_plan = plan(
-            make_turn(
-                resources=25,
-                units=workers
-                + [
-                    first_vanguard,
-                    second_vanguard,
-                    third_vanguard,
-                    first_ranger,
-                ],
-            )
-        )
-        self.assertEqual(
-            fourth_vanguard_plan["core_action"]["unit_type"],
-            "VANGUARD",
-        )
-
         second_ranger_plan = plan(
             make_turn(
                 resources=27,
@@ -3300,7 +3324,6 @@ class CoreFarmerTests(unittest.TestCase):
                     first_vanguard,
                     second_vanguard,
                     third_vanguard,
-                    fourth_vanguard,
                     first_ranger,
                 ],
             )
@@ -3309,10 +3332,12 @@ class CoreFarmerTests(unittest.TestCase):
 
     def test_mature_defense_uses_dynamic_price_preview(self) -> None:
         workers = self._workers(12)
-        fleet = [
+        vanguards = [
             unit(VANGUARD_1, "VANGUARD", (3, 0)),
             unit(VANGUARD_2, "VANGUARD", (4, 0)),
             unit(VANGUARD_3, "VANGUARD", (5, 0)),
+        ]
+        rangers = [
             unit(RANGER_1, "RANGER", (6, 0)),
             unit(RANGER_2, "RANGER", (7, 0)),
             unit(RANGER_3, "RANGER", (8, 0)),
@@ -3320,11 +3345,11 @@ class CoreFarmerTests(unittest.TestCase):
         ]
         with patch("arena_farmer.unit_cost", return_value=30):
             accumulating = plan(
-                make_turn(resources=44, units=workers + fleet),
+                make_turn(resources=44, units=workers + vanguards[:2] + rangers),
                 beacon_policy="hold",
             )
             spawning = plan(
-                make_turn(resources=45, units=workers + fleet),
+                make_turn(resources=45, units=workers + vanguards[:2] + rangers),
                 beacon_policy="hold",
             )
 
@@ -3334,21 +3359,18 @@ class CoreFarmerTests(unittest.TestCase):
         )
         self.assertEqual(spawning["core_action"]["unit_type"], "VANGUARD")
 
-        four_vanguards = fleet[:3] + [
-            unit(VANGUARD_4, "VANGUARD", (5, 1)),
-        ]
         with patch("arena_farmer.unit_cost", return_value=30):
             ranger_wait = plan(
                 make_turn(
                     resources=44,
-                    units=workers + four_vanguards + fleet[3:4],
+                    units=workers + vanguards + rangers[:3],
                 ),
                 beacon_policy="hold",
             )
             ranger_spawn = plan(
                 make_turn(
                     resources=45,
-                    units=workers + four_vanguards + fleet[3:4],
+                    units=workers + vanguards + rangers[:3],
                 ),
                 beacon_policy="hold",
             )

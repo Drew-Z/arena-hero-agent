@@ -108,8 +108,8 @@ The secret file stays on the host and is never copied into the image. Docker Com
 Tagged releases publish a prebuilt image to GHCR. To deploy it without building:
 
 ```bash
-ARENA_HERO_AGENT_IMAGE=ghcr.io/drew-z/arena-hero-agent:0.1.0 docker compose pull
-ARENA_HERO_AGENT_IMAGE=ghcr.io/drew-z/arena-hero-agent:0.1.0 docker compose up -d --no-build
+ARENA_HERO_AGENT_IMAGE=ghcr.io/wudiwangwasai/arena-hero-agent:0.1.0 docker compose pull
+ARENA_HERO_AGENT_IMAGE=ghcr.io/wudiwangwasai/arena-hero-agent:0.1.0 docker compose up -d --no-build
 ```
 
 ## Linux systemd Server

@@ -13,14 +13,14 @@ The main Agent requires only an Arena Hero API key. Configuration precedence is:
 | --- | --- | --- |
 | `--base-url` | `https://api.arenahero.io` | Arena Hero HTTP API base. |
 | `--env-file` | current `.env` | Explicit credential file. |
-| `--worker-target` | `12` | Worker goal; accepted range is 1-12. |
+| `--worker-target` | `23` | Worker goal; accepted range is 1-23. |
 | `--beacon-policy` | `retreat` | `hold`, `pursue`, or `retreat`. |
 | `--compatibility-marker` | systemd marker path | Enter compatibility hold while the file exists. |
 | `--no-compatibility-marker` | off | Disable marker checks for local/container runs. |
 | `--heartbeat-file` | none | Write liveness metadata after each accepted Turn. |
 | `--stale-turn-timeout-seconds` | `0` | Exit with a transient failure after no accepted Turn; `0` disables. |
 
-The supported unattended profile is `--worker-target 12 --beacon-policy retreat`, yielding `12 Workers + 4 Vanguards + 4 Rangers = 20`. The 20th Unit is still base-priced under gameplay v0.14; normal production stops before the 21st Unit enters dynamic pricing.
+The supported unattended profile is `--worker-target 23 --beacon-policy retreat`, yielding `23 Workers + 3 Vanguards + 4 Rangers = 30`. At 30 living Units the Core stores up to 150 resources. Production expands in tested stages and reserves resources before crossing dynamic-price thresholds.
 
 Docker Compose enables the stale-Turn timeout at 150 seconds. The systemd unit
 uses 90 seconds, below its 120-second systemd watchdog, so a reconnect loop that
@@ -44,7 +44,7 @@ receipts are authoritative when filing an upstream report.
 `/etc/arena-hero-agent/runtime.env` contains non-secret values:
 
 ```dotenv
-ARENA_WORKER_TARGET=12
+ARENA_WORKER_TARGET=23
 ARENA_BEACON_POLICY=retreat
 ARENA_TUNING_GENERATION=0
 ```

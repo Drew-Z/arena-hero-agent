@@ -8,21 +8,20 @@ The mature target is:
 
 | Unit | Target | Role |
 | --- | ---: | --- |
-| Worker | 12 | Harvest, deposit, scout, observe, and recover dropped cargo. |
-| Vanguard | 4 | Outer screen, route screening, durable Core defense, and bounded assault reinforcement. |
+| Worker | 23 | Harvest, deposit, scout, observe, and recover dropped cargo. |
+| Vanguard | 3 | Outer screen, route screening, durable Core defense, and bounded assault reinforcement. |
 | Ranger | 4 | Inner Core defense and ranged stationary-target clearing. |
-| Total | 20 | Uses every base-price slot; the 21st Unit is the first dynamically priced spawn. |
+| Total | 30 | Provides the 150-resource Core capacity target. |
 
 Gameplay v0.14 has no per-Tick upkeep or maintenance damage. Production still
 reserves resources for healing, shield repair, and emergency replacement. Every
 spawn branch previews the current price with the official SDK's `unit_cost()`;
-the settled `CORE_SPAWN_SUCCEEDED.values.cost` remains authoritative. The
-normal profile does not build Unit 21 or later automatically.
+the settled `CORE_SPAWN_SUCCEEDED.values.cost` remains authoritative.
 
-At a pre-spawn population of 20, prices rise to Worker 7, Vanguard 13, and
-Ranger 16. Higher tiers continue compounding every five population. Expansion
-beyond 20 therefore requires a separate, measured strategy change rather than
-being inferred from a temporary resource surplus.
+The tactic first grows to 12 Workers, completes the 3-Vanguard and 4-Ranger
+defense, then resumes Worker expansion. Later growth is staged at populations
+20, 24, 29, and 30 so each dynamic-price band is funded before another spawn.
+Worker prices are 7 at population 20-24 and 8 at 25-29.
 
 ## Core Safety
 
@@ -46,6 +45,9 @@ being inferred from a temporary resource surplus.
 - Empty Workers and remembered resource cells are paired with deterministic minimum-cost matching. A small intent bonus prevents churn, but a materially closer Worker can take over a target; each resource remains assigned to at most one Worker.
 - Resource routes are released after six non-improving Ticks. Scout routes change direction after three non-improving Ticks, prioritize the least recently observed chunks, and avoid sending every Worker through the same corridor.
 - Loaded Workers prioritize a legal return route and account for Core movement.
+- When a Worker occupies the Core production cell, it moves out before a spawn.
+  If both exits are occupied, the tactic queues a deterministic corridor
+  handoff; a full Core also keeps loaded Workers outside until storage reopens.
 - A loaded Worker may use the second legal slot of a cell occupied by one
   friendly unit. Core egress uses the same narrow exception, while normal
   movement still reserves one destination per Tick to prevent uncontrolled

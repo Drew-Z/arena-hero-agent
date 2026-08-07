@@ -2,213 +2,148 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-[![CI](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/ci.yml)
-[![Release image](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/release.yml/badge.svg)](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/release.yml)
-[![License](https://img.shields.io/github/license/Drew-Z/arena-hero-agent)](LICENSE)
+[![CI](https://github.com/WuDiWangWaSai/arena-hero-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/WuDiWangWaSai/arena-hero-agent/actions/workflows/ci.yml)
+[![Release image](https://github.com/WuDiWangWaSai/arena-hero-agent/actions/workflows/release.yml/badge.svg)](https://github.com/WuDiWangWaSai/arena-hero-agent/actions/workflows/release.yml)
+[![License](https://img.shields.io/github/license/WuDiWangWaSai/arena-hero-agent)](LICENSE)
 
-A deterministic, resource-first long-running agent for [Arena Hero](https://doc.arenahero.io/). It uses a hierarchical threat controller and the official `arena-hero` Python SDK, keeps decisions inside the 15-second Tick window, and can run locally, in Docker, or as hardened systemd services.
+A deterministic, resource-first long-running tactic for [Arena Hero](https://doc.arenahero.io/), maintained by [WuDiWangWaSai](https://github.com/WuDiWangWaSai). It uses the official Python SDK and supports Windows, Linux, Docker, and hardened systemd deployment.
 
-This is a community project and is not an official Arena Hero product.
+This is a community project, not an official Arena Hero product.
 
-## Highlights
+## Current Strategy
 
-- Builds toward `12 Workers + 4 Vanguards + 4 Rangers = 20`, using the complete base-price fleet before v0.14 dynamic spawn pricing starts at Unit 21.
-- Moves the Core away from the Beacon, prioritizes collection and survival, and maintains distributed Core defense.
-- Classifies lifecycle, threat, and Unit missions independently, including activity alerts, pre-evasion, engagement, multi-axis breakout, and detached-squad return.
-- Scouts stale map regions, tracks resource memory, returns cargo, and recovers dropped cargo after losses.
-- Avoids active enemy fleets while opportunistically clearing confirmed stationary threats or isolated Cores.
-- Detects game/SDK compatibility changes before unattended play continues.
-- Keeps AI out of the per-Tick control loop. Optional model review only analyzes anomaly reports after the fact.
+The default profile targets:
 
-```mermaid
-flowchart LR
-    Game["Arena Hero API"] -->|"authoritative Turn"| Agent["Deterministic Agent"]
-    Agent -->|"one current-Tick plan"| Game
-    Agent --> Assessment["Hierarchical threat assessment"]
-    Assessment --> Agent
-    Agent --> Logs["Structured logs"]
-    Logs --> Supervisor["Optional deterministic supervisor"]
-    Supervisor -. "explicit AI opt-in" .-> Model["Responses-compatible model channel"]
-    Logs --> Optimizer["Optional root optimizer"]
-    Version["Version monitor"] --> Marker["Compatibility hold"]
-    Marker --> Agent
-```
+| Unit | Target | Purpose |
+| --- | ---: | --- |
+| Worker | 23 | Harvest, deposit, scouting, and cargo recovery |
+| Vanguard | 3 | Outer Core defense and route screening |
+| Ranger | 4 | Inner defense and ranged counterfire |
+| Total | 30 | Raises Core resource capacity to 150 |
+
+The tactic is aligned with gameplay rules v0.14 and `arena-hero` SDK 0.2.9:
+
+- Builds the early economy and minimum defense first, reaches 12 Workers, completes the full `3 Vanguard + 4 Ranger` defense, then resumes Worker expansion.
+- Funds dynamic-price growth in stages at populations 20, 24, 29, and 30 instead of spending every temporary surplus.
+- Keeps a strict 30-Unit production cap. Core capacity is `max(10, population * 5)`, so the mature fleet stores 150 resources.
+- Clears the Core production cell by moving its Worker out. Congested exits use a deterministic corridor handoff; a full Core keeps loaded Workers outside until storage is available.
+- Treats every Turn as authoritative, re-evaluates dynamic resource cells, avoids duplicate harvest assignments, and recovers dropped Worker cargo.
+- Separates lifecycle, threat, and mission decisions. Threat states include `NORMAL`, `ALERT`, `PRE_EVADE`, `ENGAGED`, and `BREAKOUT`.
+- Keeps Core migration for verified survival threats; ordinary production-lane clearing moves Workers, not the Core.
+- Uses target-free Ranger cell fire, post-combat healing, recovery after Core loss, compatibility hold, heartbeat health checks, and structured diagnostics.
+
+See [strategy](docs/strategy.md), [threat response](docs/threat-response.md), and [configuration](docs/configuration.md) for the detailed policy.
 
 ## Requirements
 
 - Python 3.11 or newer
 - An Arena Hero API key
-- Docker Compose v2 for the container path
-- A GNU/Linux server with systemd 235+ for the unattended server path; systemd
-  247+ applies the complete unit hardening policy
+- PowerShell on Windows, or a POSIX shell on Linux
+- Docker or systemd only when using those deployment paths
 
-The tested contract is API `v0.1`, gameplay `v0.14`, and official Python SDK `0.2.9`. Gameplay v0.14 removes per-Tick upkeep and maintenance damage. Unit 21 and later use dynamic spawn prices, so the Agent previews every purchase with the official SDK and reconciles the settled event cost. The bundled version monitor fails closed when it detects an incompatible contract.
+Dependencies are hash-locked. The runtime uses `arena-hero==0.2.9`.
 
-## Quick Start
+## Windows
 
-Clone the repository and enter its directory before choosing a deployment path:
-
-```bash
-git clone https://github.com/Drew-Z/arena-hero-agent.git
-cd arena-hero-agent
-```
-
-### Windows
+Clone and prepare the environment in PowerShell:
 
 ```powershell
+git clone https://github.com/WuDiWangWaSai/arena-hero-agent.git
+cd arena-hero-agent
 .\scripts\bootstrap.ps1
 .\start_agent.ps1
 ```
 
-The first start securely prompts for the Arena Hero key and appends it to the ignored `.env` file. After bootstrapping, `start_agent.cmd` is also available for double-click use and keeps errors visible instead of closing immediately.
+On the first run, `start_agent.ps1` securely prompts for the API key when neither `.env` nor `ARENA_HERO_API_KEY` provides one. It writes logs to `arena_farmer.log`, rotates them, and retries transient exit code 75 with backoff.
 
-### Linux or macOS
+From Command Prompt, use the wrapper:
 
-```bash
-sh scripts/bootstrap.sh
-cp .env.example .env
-chmod 600 .env
-# Edit .env and set ARENA_HERO_API_KEY.
-sh scripts/run-agent.sh
+```bat
+start_agent.cmd
 ```
 
-The POSIX bootstrap auto-detects versioned Python 3.11+ commands. On systems
-whose `python3` is older, you can force one with
-`PYTHON_BIN="$(command -v python3.11)" sh scripts/bootstrap.sh`.
+PowerShell parameters use a single dash and PowerShell names:
 
-### Docker Compose
+```powershell
+.\start_agent.ps1 -WorkerTarget 23 -BeaconPolicy retreat
+```
+
+Stop the foreground process with `Ctrl+C`.
+
+## Linux
 
 ```bash
-mkdir -p secrets
-cp secrets/arena_hero_api_key.example.txt secrets/arena_hero_api_key.txt
-# Replace the placeholder in secrets/arena_hero_api_key.txt, then:
+git clone https://github.com/WuDiWangWaSai/arena-hero-agent.git
+cd arena-hero-agent
+cp .env.example .env
+# Edit .env locally and set ARENA_HERO_API_KEY. Never commit it.
+./scripts/bootstrap.sh
+./scripts/run-agent.sh
+```
+
+Runtime tuning can be supplied without editing code:
+
+```bash
+ARENA_WORKER_TARGET=23 ARENA_BEACON_POLICY=retreat ./scripts/run-agent.sh
+```
+
+## Docker Compose
+
+Place the API key as the only line in `secrets/arena_hero_api_key.txt`, then run:
+
+```bash
 docker compose up -d --build
 docker compose logs -f agent
 ```
 
-Compose mounts the key as a Docker secret. The image runs as an unprivileged user with a read-only filesystem and does not include the supervisor or optimizer.
-
-Use the published image without a local build:
+To use a published release image:
 
 ```bash
-ARENA_HERO_AGENT_IMAGE=ghcr.io/drew-z/arena-hero-agent:0.1.0 docker compose up -d --no-build
+ARENA_HERO_AGENT_IMAGE=ghcr.io/wudiwangwasai/arena-hero-agent:0.1.0 docker compose up -d --no-build
 ```
 
-### Linux server with systemd
+The container is read-only, drops Linux capabilities, uses a Docker secret, and reports health from accepted Turns.
 
-From a checked-out release on the server:
+## systemd
+
+Install the main Agent and version monitor on a supported Linux host:
 
 ```bash
 sudo sh scripts/install-systemd.sh
+sudo systemctl status arena-hero-agent.service --no-pager
 sudo journalctl -fu arena-hero-agent.service -o short-iso-precise
 ```
-
-Ubuntu 22.04 uses Python 3.10 by default. Install a system-wide Python 3.11+
-with its matching `venv` package and pass it with `--python`; see the
-[Linux support matrix](docs/deployment.md#linux-systemd-server) for Debian,
-Ubuntu, RHEL/Alma/Rocky, Fedora, Arch, and openSUSE guidance.
-
-The installer prompts for the Arena Hero key without echoing it, builds an
-immutable release under `/opt/arena-hero-agent/releases`, atomically updates the
-`current` symlink, and enables the main Agent plus the six-hour compatibility
-monitor. A failed compatibility, restart, or health check restores the prior
-release. After a successful upgrade, use `sudo arena-hero-rollback` for an
-immediate version swap.
-
-After strategy code is published, update an existing running systemd instance
-from its checkout with one command:
-
-```bash
-sh scripts/update-systemd.sh
-```
-
-Run the updater as the checkout owner, without `sudo`. It accepts only a clean
-branch with a configured upstream, fetches and verifies a fast-forward update,
-archives the exact target commit, then builds and validates the new release from
-an isolated root-owned staging directory. systemd stops the old strategy process
-during restart before it starts the new version, so two main Agent instances do
-not run in parallel.
-Existing credentials, runtime tuning, and enabled optional components are
-preserved. The previous release remains active while the new release is being
-prepared; the installer attempts to restore it if restart or health validation
-fails and reports when recovery itself needs manual intervention.
 
 Optional components are explicit:
 
 ```bash
-# Deterministic, read-only anomaly reports; no model required.
 sudo sh scripts/install-systemd.sh --with-supervisor
-
-# Model review; first configure a private env file from the example.
-sudo sh scripts/install-systemd.sh --with-ai /secure/path/supervisor.env
-
-# High-privilege runtime tuning; read docs/deployment.md before enabling.
 sudo sh scripts/install-systemd.sh --with-optimizer
 ```
 
-## AI Monitoring Is Optional
+The supervisor performs deterministic health review. The optimizer only tests allow-listed Worker targets and can restart or roll back the service; it is disabled by default.
 
-The main Agent never needs a model. The supervisor always runs deterministic checks first. It calls a model only when all of these are true:
-
-1. `ARENA_SUPERVISOR_AI_ENABLED=true` is explicitly set.
-2. A deterministic anomaly trigger fires.
-3. The base URL, API key, and at least one model ID are configured.
-
-Model output is advisory and read-only. It cannot submit game plans, rewrite the tactic, or restart the Agent. See [configuration](docs/configuration.md) for provider settings.
-
-The separate optimizer can update a narrow runtime configuration and restart the systemd service. It runs as root by design and is disabled by default.
-
-## Configuration
-
-Common Agent options:
-
-```text
---worker-target 12
---beacon-policy retreat
---base-url https://api.arenahero.io
---compatibility-marker PATH
---no-compatibility-marker
-```
-
-See [configuration](docs/configuration.md), [deployment](docs/deployment.md), and [strategy](docs/strategy.md) for the complete operational contract.
-
-Before the first public commit, follow the [release checklist](docs/release-checklist.md).
-
-## Documentation and Community
-
-- [LINUX DO](https://linux.do/) - an open-source community this project recognizes and supports
-- [Documentation index](docs/README.md)
-- [Strategy design](docs/strategy.md)
-- [Threat response state machine](docs/threat-response.md)
-- [Contributing](CONTRIBUTING.md)
-- [Code of Conduct](CODE_OF_CONDUCT.md)
-- [Security policy](SECURITY.md)
-
-## Development
+Production updates must use the transactional updater:
 
 ```bash
-python -m pip install --require-hashes -r requirements-build.lock
-python -m pip install --require-hashes -r requirements.lock
-python -m pip install --no-deps --no-build-isolation -e .
-python -m unittest discover -v
-python -m compileall -q arena_farmer.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
-python scripts/check_secrets.py
+sh scripts/update-systemd.sh
+sudo systemctl is-active arena-hero-agent.service
+cat /opt/arena-hero-agent/current/source-commit
 ```
 
-Tests use synthetic UUIDs and do not need an API key or a live game connection.
-CI runs Python 3.11-3.13 on GitHub-hosted Ubuntu and Windows, and also validates
-the container build and systemd units. This is not a claim that every Linux
-distribution has received a real service installation test.
+See [deployment](docs/deployment.md) for supported distributions, rollback, optional AI review, and uninstall procedures.
 
-Regenerate the lock files with the exact `uv pip compile` commands recorded in
-their headers, then review and test the resulting dependency diff before commit.
+## Tests and Safety
 
-## Security
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover
+.\.venv\Scripts\python.exe -m compileall -q arena_farmer.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
+.\.venv\Scripts\python.exe -m pip check
+.\.venv\Scripts\python.exe scripts\check_secrets.py
+```
 
-Never commit `.env`, model-provider files, Docker secret files, logs, or systemd credentials. If a key appears in chat, logs, an issue, or Git history, rotate it immediately; deleting the text is not sufficient.
-
-Report vulnerabilities through the process in [SECURITY.md](SECURITY.md). For contribution rules, see [CONTRIBUTING.md](CONTRIBUTING.md).
+Credentials belong only in environment variables, `.env`, Docker secrets, or protected systemd configuration. Do not commit API keys, player identifiers, private logs, or model credentials.
 
 ## License
 
-Licensed under the [Apache License 2.0](LICENSE), matching the official Arena Hero Python SDK.
+Licensed under [Apache-2.0](LICENSE). Security reports should follow [SECURITY.md](SECURITY.md), and contributions should follow [CONTRIBUTING.md](CONTRIBUTING.md).

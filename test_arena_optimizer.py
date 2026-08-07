@@ -155,18 +155,18 @@ class OptimizerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "candidate_not_allowed"):
             _candidate_from_mapping({"worker_target": 14, "beacon_policy": "pursue"})
         with self.assertRaisesRegex(ValueError, "candidate_not_allowed"):
-            _candidate_from_mapping({"worker_target": 17, "beacon_policy": "retreat"})
+            _candidate_from_mapping({"worker_target": 18, "beacon_policy": "retreat"})
 
     def test_next_candidate_only_scales_up_and_honors_blacklist(self) -> None:
         self.assertEqual(_next_candidate(Candidate(10), 100, {}), Candidate(12))
         blocked = {Candidate(12).key: 101}
-        self.assertIsNone(_next_candidate(Candidate(10), 100, blocked))
-        self.assertIsNone(_next_candidate(Candidate(12), 100, {}))
+        self.assertEqual(_next_candidate(Candidate(10), 100, blocked), Candidate(17))
+        self.assertEqual(_next_candidate(Candidate(12), 100, {}), Candidate(17))
 
     def test_runtime_config_bootstraps_and_rejects_unknown_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "runtime.env"
-            self.assertEqual(read_runtime_config(path), Candidate(12))
+            self.assertEqual(read_runtime_config(path), Candidate(23))
             self.assertIn("ARENA_BEACON_POLICY=retreat", path.read_text())
             path.write_text(
                 "ARENA_WORKER_TARGET=14\nARENA_BEACON_POLICY=pursue\n",

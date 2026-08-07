@@ -42,7 +42,7 @@ jobs:
       - id: metadata
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
-          images: ghcr.io/drew-z/arena-hero-agent
+          images: ghcr.io/wudiwangwasai/arena-hero-agent
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}

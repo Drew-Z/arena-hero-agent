@@ -3,8 +3,8 @@ param(
     [string]$PythonPath,
     [string]$EnvFile = ".env",
     [string]$LogFile = "arena_farmer.log",
-    [ValidateRange(1, 12)]
-    [int]$WorkerTarget = 12,
+    [ValidateRange(1, 23)]
+    [int]$WorkerTarget = 23,
     [ValidateSet("hold", "pursue", "retreat")]
     [string]$BeaconPolicy = "retreat",
     [string]$BaseUrl,
@@ -65,7 +65,7 @@ if (-not (Test-Path -LiteralPath $PythonPath -PathType Leaf)) {
 }
 
 $keyInEnvironment = -not [string]::IsNullOrWhiteSpace($env:ARENA_HERO_API_KEY)
-$keyInFile = Test-Path -LiteralPath $envPath -PathType Leaf -and
+$keyInFile = (Test-Path -LiteralPath $envPath -PathType Leaf) -and
     (Select-String -LiteralPath $envPath -Pattern '^\s*ARENA_HERO_API_KEY\s*=\s*\S+' -Quiet) -and
     -not (Select-String -LiteralPath $envPath -Pattern '^\s*ARENA_HERO_API_KEY\s*=\s*(replace-with|your-|<)' -Quiet)
 if (-not $keyInEnvironment -and -not $keyInFile) {
@@ -119,8 +119,17 @@ Set-Location -LiteralPath $projectRoot
 while ($true) {
     Invoke-AgentLogRotation
     $runStartedAt = Get-Date
-    & $PythonPath @agentArguments 2>&1 | Tee-Object -FilePath $logPath -Append
-    $agentExitCode = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $PythonPath @agentArguments 2>&1 |
+            ForEach-Object -Process { "$_" } -ErrorAction Stop |
+            Tee-Object -FilePath $logPath -Append -ErrorAction Stop
+        $agentExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
 
     if ($agentExitCode -ne $transientExitCode) {
         break

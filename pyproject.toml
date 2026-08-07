@@ -7,6 +7,7 @@ name = "arena-hero-agent"
 version = "0.1.0"
 description = "A deterministic, resource-first Arena Hero agent with hierarchical threat response."
 readme = "README.md"
+authors = [{ name = "WuDiWangWaSai" }]
 requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -26,10 +27,10 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Drew-Z/arena-hero-agent"
-Documentation = "https://github.com/Drew-Z/arena-hero-agent#readme"
-Issues = "https://github.com/Drew-Z/arena-hero-agent/issues"
-Source = "https://github.com/Drew-Z/arena-hero-agent"
+Homepage = "https://github.com/WuDiWangWaSai/arena-hero-agent"
+Documentation = "https://github.com/WuDiWangWaSai/arena-hero-agent#readme"
+Issues = "https://github.com/WuDiWangWaSai/arena-hero-agent/issues"
+Source = "https://github.com/WuDiWangWaSai/arena-hero-agent"
 
 [project.scripts]
 arena-hero-agent = "arena_farmer:main"
