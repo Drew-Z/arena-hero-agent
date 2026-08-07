@@ -16,6 +16,7 @@ DEFAULT_VERSION_REPORT = Path("/var/lib/arena-hero-version/latest.json")
 DEFAULT_SUPERVISOR_REPORT = Path("/var/lib/arena-hero-supervisor/latest.json")
 DEFAULT_MAX_HEARTBEAT_AGE_SECONDS = 180
 DEFAULT_MAX_REPORT_AGE_SECONDS = 7 * 60 * 60
+DEFAULT_MAX_FUTURE_SKEW_SECONDS = 5
 
 CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
@@ -89,27 +90,37 @@ def check_heartbeat(
     path: Path,
     *,
     max_age_seconds: int,
+    max_future_skew_seconds: int = DEFAULT_MAX_FUTURE_SKEW_SECONDS,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     now = (now or datetime.now(UTC)).astimezone(UTC)
     try:
         payload = _load_json(path)
         generated_at = _parse_timestamp(payload.get("generated_at"))
-        age_seconds = max(0.0, (now - generated_at).total_seconds())
+        signed_age_seconds = (now - generated_at).total_seconds()
+        timestamp_valid = signed_age_seconds >= -max_future_skew_seconds
+        age_seconds = max(0.0, signed_age_seconds)
         tick = payload.get("tick")
         core_alive = payload.get("core_alive")
         ok = (
             isinstance(tick, int)
             and tick > 0
             and core_alive is True
+            and timestamp_valid
             and age_seconds <= max_age_seconds
         )
-        reason = "ok" if ok else "stale_or_invalid_heartbeat"
+        if ok:
+            reason = "ok"
+        elif not timestamp_valid:
+            reason = "heartbeat_timestamp_in_future"
+        else:
+            reason = "stale_or_invalid_heartbeat"
         return {
             "ok": ok,
             "reason": reason,
             "path": str(path),
             "age_seconds": round(age_seconds, 3),
+            "future_skew_seconds": round(max(0.0, -signed_age_seconds), 3),
             "tick": tick,
             "core_alive": core_alive,
             "resources": payload.get("resources"),
@@ -177,6 +188,7 @@ def check_report(
     timestamp_field: str,
     max_age_seconds: int,
     allowed_statuses: set[str],
+    max_future_skew_seconds: int = DEFAULT_MAX_FUTURE_SKEW_SECONDS,
     now: datetime | None = None,
     required: bool = True,
 ) -> dict[str, Any]:
@@ -186,7 +198,9 @@ def check_report(
     try:
         payload = _load_json(path)
         generated_at = _parse_timestamp(payload.get(timestamp_field))
-        age_seconds = max(0.0, (now - generated_at).total_seconds())
+        signed_age_seconds = (now - generated_at).total_seconds()
+        timestamp_valid = signed_age_seconds >= -max_future_skew_seconds
+        age_seconds = max(0.0, signed_age_seconds)
         status = payload.get("status")
         hold = bool(payload.get("hold", False))
         requires_human = bool(payload.get("requires_human", False))
@@ -194,11 +208,14 @@ def check_report(
             status in allowed_statuses
             and not hold
             and not requires_human
+            and timestamp_valid
             and age_seconds <= max_age_seconds
         )
         ok = report_ok or not required
         if report_ok:
             reason = "ok"
+        elif not timestamp_valid and required:
+            reason = "report_timestamp_in_future"
         elif required:
             reason = "report_stale_or_unhealthy"
         else:
@@ -208,6 +225,7 @@ def check_report(
             "reason": reason,
             "path": str(path),
             "age_seconds": round(age_seconds, 3),
+            "future_skew_seconds": round(max(0.0, -signed_age_seconds), 3),
             "status": status,
             "hold": hold,
             "requires_human": requires_human,

@@ -49,6 +49,33 @@ class ArenaHealthTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertEqual(result["reason"], "stale_or_invalid_heartbeat")
 
+    def test_heartbeat_allows_small_clock_skew_but_rejects_future_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "heartbeat.json"
+            write_heartbeat(
+                path,
+                tick=42,
+                resources=18,
+                population=7,
+                core_alive=True,
+                generated_at=NOW + timedelta(seconds=5),
+            )
+            allowed = check_heartbeat(path, max_age_seconds=180, now=NOW)
+
+            write_heartbeat(
+                path,
+                tick=43,
+                resources=18,
+                population=7,
+                core_alive=True,
+                generated_at=NOW + timedelta(seconds=6),
+            )
+            rejected = check_heartbeat(path, max_age_seconds=180, now=NOW)
+
+            self.assertTrue(allowed["ok"])
+            self.assertFalse(rejected["ok"])
+            self.assertEqual(rejected["reason"], "heartbeat_timestamp_in_future")
+
     def test_systemd_report_combines_runtime_and_monitor_checks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -246,6 +273,32 @@ class ArenaHealthTests(unittest.TestCase):
             self.assertEqual(optional["reason"], "optional_report_ignored")
             self.assertFalse(required["ok"])
             self.assertEqual(required["reason"], "report_unavailable:JSONDecodeError")
+
+    def test_required_report_rejects_excessive_future_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            report_path = Path(directory) / "version.json"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "checked_at": "2026-08-03T12:00:06Z",
+                        "status": "compatible",
+                        "hold": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = check_report(
+                report_path,
+                timestamp_field="checked_at",
+                max_age_seconds=7 * 60 * 60,
+                allowed_statuses={"compatible"},
+                now=NOW,
+                required=True,
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["reason"], "report_timestamp_in_future")
 
 
 if __name__ == "__main__":

@@ -15,7 +15,8 @@ This is a community project and is not an official Arena Hero product.
 - Builds toward `12 Workers + 4 Vanguards + 4 Rangers = 20`, using the complete base-price fleet before v0.14 dynamic spawn pricing starts at Unit 21.
 - Moves the Core away from the Beacon, prioritizes collection and survival, and maintains distributed Core defense.
 - Classifies lifecycle, threat, and Unit missions independently, including activity alerts, pre-evasion, engagement, multi-axis breakout, and detached-squad return.
-- Scouts stale map regions, tracks resource memory, returns cargo, and recovers dropped cargo after losses.
+- Scouts stale map regions, invalidates depleted resource memory through real line of sight, returns cargo, and recovers dropped cargo after losses.
+- Rebuilds a lost fleet in guarded stages and coordinates same-Tick defender damage to reduce overkill.
 - Avoids active enemy fleets while opportunistically clearing confirmed stationary threats or isolated Cores.
 - Detects game/SDK compatibility changes before unattended play continues.
 - Keeps AI out of the per-Tick control loop. Optional model review only analyzes anomaly reports after the fact.
@@ -42,7 +43,7 @@ flowchart LR
 - A GNU/Linux server with systemd 235+ for the unattended server path; systemd
   247+ applies the complete unit hardening policy
 
-The tested contract is API `v0.1`, gameplay `v0.14`, and official Python SDK `0.2.9`. Gameplay v0.14 removes per-Tick upkeep and maintenance damage. Unit 21 and later use dynamic spawn prices, so the Agent previews every purchase with the official SDK and reconciles the settled event cost. The bundled version monitor fails closed when it detects an incompatible contract.
+The tested contract is API `v0.1`, gameplay `v0.14`, and official Python SDK `0.2.9`. Gameplay v0.14 removes per-Tick upkeep and maintenance damage. Unit 21 and later use dynamic spawn prices, so the Agent previews every purchase with the official SDK and reconciles the settled event cost. The bundled version monitor immediately holds on confirmed drift. After a recent compatible check, two transient fetch failures are tolerated; the third consecutive failure or any failure without a fresh baseline fails closed.
 
 ## Quick Start
 

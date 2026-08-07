@@ -46,11 +46,21 @@ being inferred from a temporary resource surplus.
 - Empty Workers and remembered resource cells are paired with deterministic minimum-cost matching. A small intent bonus prevents churn, but a materially closer Worker can take over a target; each resource remains assigned to at most one Worker.
 - Resource routes are released after six non-improving Ticks. Scout routes change direction after three non-improving Ticks, prioritize the least recently observed chunks, and avoid sending every Worker through the same corridor.
 - Loaded Workers prioritize a legal return route and account for Core movement.
+- A remembered resource disappears immediately when a friendly Core or Unit has
+  a rule-correct unobstructed view of its cell and the authoritative Turn no
+  longer reports it. Hidden cells retain bounded memory instead of being erased
+  by distance alone.
 - A loaded Worker may use the second legal slot of a cell occupied by one
   friendly unit. Core egress uses the same narrow exception, while normal
   movement still reserves one destination per Tick to prevent uncontrolled
   stacking.
-- Recovery mode protects the replacement Worker and dropped cargo after a Core loss.
+- Same-Tick deposits can fund Core healing, repair, or production. The budget
+  also reserves the conservative maximum cost of Unit heals already queued in
+  the plan, so the Core cannot overspend their shared resource pool.
+- Recovery mode protects the replacement Worker and dropped cargo after a Core
+  loss. In safe windows it rebuilds to four Workers, one Vanguard, six Workers,
+  and one Ranger before resuming normal expansion; recovery cannot exit without
+  both early defenders.
 
 ## Combat Policy
 
@@ -64,7 +74,12 @@ being inferred from a temporary resource surplus.
   or imminent cargo delivery pauses the return.
 - Confirmed stationary units can be cleared by a small bounded strike group while guards remain with the Core, but only outside combat pressure.
 - A stationary Core is considered for a raid only after repeated observations and isolation checks. The Worker that exposed it may remain as the designated observer. The default strike group can engage from at most 48 path-independent Manhattan cells and releases a target if pulled beyond 56, while one Vanguard and one Ranger remain as Core guards.
-- Under gameplay v0.14, Rangers use target-free cell fire for legal defensive shots so another hostile remaining in the submitted cell can still be hit. A strike Ranger may also fire at the remembered cell of a confirmed stationary Core during a short visibility gap.
+- Defenders share a same-Tick projected-damage ledger and prefer a living target
+  that is not already expected to die. Vanguard sweep damage is recorded for
+  every hostile on the swept cell. A Ranger uses a precise target attack when
+  several hostiles share one cell, avoiding ambiguous cell resolution; otherwise
+  it retains target-free cell fire. A strike Ranger may also fire at the
+  remembered cell of a confirmed stationary Core during a short visibility gap.
 - Loss of visibility does not immediately invalidate stationary-target memory, but moving escorts, contradictory observations, age, and risk reduce confidence.
 - Loot events, storage capacity, same-Tick Core survival, and return-path cost determine whether a kill was economically useful.
 

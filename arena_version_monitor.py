@@ -21,6 +21,9 @@ DEFAULT_MARKER_PATH = Path(
     "/var/lib/arena-hero-version/compatibility-hold.json"
 )
 DEFAULT_REPORT_PATH = Path("/var/lib/arena-hero-version/latest.json")
+CHECK_FAILURE_THRESHOLD = 3
+COMPATIBLE_BASELINE_TTL_SECONDS = 24 * 60 * 60
+MAX_FUTURE_SKEW_SECONDS = 5
 
 REVIEWED_API_VERSION = "v0.1"
 REVIEWED_GAMEPLAY_VERSION = "v0.14"
@@ -128,6 +131,23 @@ def _timestamp(now: datetime | None = None) -> str:
     )
 
 
+def _parse_timestamp(value: object) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("timestamp_missing")
+    parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp_timezone_missing")
+    return parsed.astimezone(UTC)
+
+
+def _load_report(path: Path) -> Mapping[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, Mapping) else None
+
+
 def atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = (
@@ -195,9 +215,13 @@ def evaluate_versions(
         "status": status,
         "hold": bool(reasons),
         "reasons": reasons,
+        "check_status": "ok",
+        "consecutive_check_failures": 0,
         "observed": observed,
         "reviewed": reviewed,
     }
+    if not reasons:
+        report["last_success_at"] = checked_at
     atomic_write_json(report_path, report)
     if reasons:
         atomic_write_json(marker_path, report)
@@ -212,17 +236,72 @@ def record_check_failure(
     report_path: Path,
     error: Exception,
     now: datetime | None = None,
+    failure_threshold: int = CHECK_FAILURE_THRESHOLD,
+    baseline_ttl_seconds: int = COMPATIBLE_BASELINE_TTL_SECONDS,
 ) -> dict[str, Any]:
+    checked_at_value = (now or datetime.now(UTC)).astimezone(UTC)
+    checked_at = _timestamp(checked_at_value)
+    previous = _load_report(report_path)
+    last_success_at: datetime | None = None
+    previous_failures = 0
+    if (
+        previous is not None
+        and previous.get("status") == "compatible"
+        and not bool(previous.get("hold", False))
+    ):
+        try:
+            last_success_at = _parse_timestamp(
+                previous.get("last_success_at", previous.get("checked_at"))
+            )
+            failure_count = previous.get("consecutive_check_failures", 0)
+            if (
+                isinstance(failure_count, int)
+                and not isinstance(failure_count, bool)
+                and failure_count >= 0
+            ):
+                previous_failures = failure_count
+            else:
+                last_success_at = None
+        except ValueError:
+            last_success_at = None
+
+    consecutive_failures = previous_failures + 1
+    baseline_age = (
+        (checked_at_value - last_success_at).total_seconds()
+        if last_success_at is not None
+        else None
+    )
+    baseline_fresh = (
+        baseline_age is not None
+        and baseline_age >= -MAX_FUTURE_SKEW_SECONDS
+        and baseline_age <= baseline_ttl_seconds
+    )
+    grace_active = (
+        not marker_path.exists()
+        and baseline_fresh
+        and consecutive_failures < failure_threshold
+    )
+    reason = f"check_failed:{type(error).__name__}"
     report: dict[str, Any] = {
         "schema_version": 1,
-        "checked_at": _timestamp(now),
-        "status": "check_failed",
-        "hold": True,
-        "reasons": [f"check_failed:{type(error).__name__}"],
+        "checked_at": checked_at,
+        "status": "compatible" if grace_active else "check_failed",
+        "hold": not grace_active,
+        "reasons": [reason],
+        "check_status": "temporarily_failed" if grace_active else "failed",
+        "consecutive_check_failures": consecutive_failures,
     }
+    if last_success_at is not None:
+        report["last_success_at"] = _timestamp(last_success_at)
+    if previous is not None:
+        for field in ("observed", "reviewed"):
+            if isinstance(previous.get(field), Mapping):
+                report[field] = previous[field]
     atomic_write_json(report_path, report)
-    if not marker_path.exists():
+    if not grace_active and not marker_path.exists():
         atomic_write_json(marker_path, report)
+    elif grace_active:
+        marker_path.unlink(missing_ok=True)
     return report
 
 

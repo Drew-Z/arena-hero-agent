@@ -16,6 +16,7 @@ All notable changes to this project will be documented in this file. The format 
 - Gameplay v0.13 and official SDK 0.2.8 compatibility, including conservative Ranger cell fire against a confirmed stationary Core during short visibility gaps.
 - Hierarchical lifecycle and threat assessment with explicit posture/reason diagnostics for alerts, pre-evasion, engagement, multi-axis breakout, recovery, and compatibility hold.
 - Gameplay v0.14 and official SDK 0.2.9 compatibility, including dynamic Unit-price boundary tests and authoritative spawn-cost reconciliation.
+- Vision-aware resource invalidation and Core-observer positioning using integer supercover lines instead of distance-only visibility assumptions.
 
 ### Changed
 
@@ -27,6 +28,9 @@ All notable changes to this project will be documented in this file. The format 
 - Scout routes prefer less recently covered chunks and rotate after three consecutive non-improving Ticks.
 - The default mature fleet is now `12 Workers + 4 Vanguards + 4 Rangers = 20`, using all base-price slots without automatically entering Unit 21's dynamic-price tier.
 - All production paths use the SDK's current `unit_cost()` preview while preserving operational reserves. Obsolete upkeep diagnostics and alerts are replaced by settled spawn cost, required-price, and repeated affordability-failure telemetry.
+- Recovery now rebuilds Workers and early defenders in explicit stages. Same-Tick deposits can fund Core actions while queued Unit healing remains reserved.
+- Vanguards and Rangers coordinate projected damage to reduce overkill; Rangers use precise target fire when multiple hostiles occupy one cell.
+- Health checks reject timestamps beyond a five-second future-skew allowance. Version monitoring tolerates two transient failures only when backed by a recent compatible baseline and fails closed on the third.
 
 ## [0.1.0] - 2026-08-03
 

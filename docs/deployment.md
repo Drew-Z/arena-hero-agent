@@ -229,6 +229,13 @@ handled interruption restores them immediately, while the next install or
 rollback repairs a transaction left by an uncatchable process or host failure.
 The failed immutable release is retained for diagnosis.
 
+Confirmed API, gameplay, server, or SDK drift creates a compatibility hold
+immediately. A transient network or parsing failure also fails closed when no
+recent compatible report exists. With a compatible baseline no older than 24
+hours, the first two consecutive transient failures retain compatibility while
+reporting `check_status=temporarily_failed`; the third creates the hold. The next
+successful check resets the failure count.
+
 The main unit uses a 90-second accepted-Turn deadline with systemd's 120-second
 watchdog as a second layer. Transient exit code 75 always restarts, while
 authentication, policy, protocol, configuration, and terminal Agent failures do
@@ -312,6 +319,8 @@ sudo /opt/arena-hero-agent/current/.venv/bin/arena-hero-health --require-supervi
 Omit `--require-supervisor` when the optional supervisor timer was not installed.
 The command exits nonzero when the service is down, the accepted-Turn heartbeat is
 stale, version compatibility is on hold, or a required report is stale/critical.
+Heartbeat and required-report timestamps more than five seconds in the future
+also fail health validation instead of being treated as age zero.
 
 Stop only the game Agent:
 

@@ -69,6 +69,12 @@ CORE_RAID_STRIKE_RELEASE_DISTANCE = 56
 CORE_RAID_MEMORY_TTL = 16
 CORE_OBSERVER_MIN_DISTANCE = 2
 CORE_OBSERVER_MAX_DISTANCE = 3
+CORE_VISION_RADIUS = 5
+UNIT_VISION_RADII = {
+    UnitType.WORKER: 3,
+    UnitType.VANGUARD: 4,
+    UnitType.RANGER: 5,
+}
 ISOLATED_CORE_MIN_RESOURCES = 5
 ISOLATED_CORE_MIN_RESOURCE_SPACE = 10
 STATIC_WORKER_CONFIRM_TICKS = 2
@@ -94,7 +100,9 @@ RESOURCE_COOLDOWN_TICKS = 8
 RESOURCE_ASSIGNMENT_STICKY_BONUS = 2
 SCOUT_STALL_TICKS = 3
 RECOVERY_TICKS = 160
+RECOVERY_VANGUARD_WORKER_GOAL = 4
 RECOVERY_MIN_WORKERS = 6
+RECOVERY_RANGER_WORKER_GOAL = RECOVERY_MIN_WORKERS
 RECOVERY_MIN_RESOURCES = 20
 RECOVERY_THREAT_DISTANCE = 12
 RECOVERY_INFERENCE_RESOURCE_LIMIT = CORE_RESOURCE_RESERVE + unit_cost(
@@ -1207,6 +1215,93 @@ def _intermediate_cells(start: Position, target: Position) -> tuple[Position, ..
     )
 
 
+def _supercover_cells(start: Position, target: Position) -> tuple[Position, ...]:
+    dx = target[0] - start[0]
+    dy = target[1] - start[1]
+    steps_x = abs(dx)
+    steps_y = abs(dy)
+    if steps_x == 0 and steps_y == 0:
+        return ()
+    step_x = 0 if dx == 0 else (1 if dx > 0 else -1)
+    step_y = 0 if dy == 0 else (1 if dy > 0 else -1)
+    x, y = start
+    progress_x = 0
+    progress_y = 0
+    cells: list[Position] = []
+    while progress_x < steps_x or progress_y < steps_y:
+        cross_x = (1 + 2 * progress_x) * steps_y
+        cross_y = (1 + 2 * progress_y) * steps_x
+        if cross_x == cross_y:
+            side_x = (x + step_x, y)
+            side_y = (x, y + step_y)
+            if side_x != start:
+                cells.append(side_x)
+            if side_y != start and side_y != side_x:
+                cells.append(side_y)
+            x += step_x
+            y += step_y
+            progress_x += 1
+            progress_y += 1
+            diagonal = (x, y)
+            if diagonal not in {side_x, side_y}:
+                cells.append(diagonal)
+        elif cross_x < cross_y:
+            x += step_x
+            progress_x += 1
+            cells.append((x, y))
+        else:
+            y += step_y
+            progress_y += 1
+            cells.append((x, y))
+    return tuple(cells)
+
+
+def _has_vision_line(
+    start: Position,
+    target: Position,
+    obstacles: set[Position],
+) -> bool:
+    return not any(
+        cell != target and cell in obstacles
+        for cell in _supercover_cells(start, target)
+    )
+
+
+def _observer_can_see(
+    start: Position,
+    target: Position,
+    radius: int,
+    obstacles: set[Position],
+) -> bool:
+    return (
+        _distance(start, target) <= radius
+        and _has_vision_line(start, target, obstacles)
+    )
+
+
+def _cell_visible_to_friendly(
+    turn: Turn,
+    target: Position,
+    obstacles: set[Position],
+) -> bool:
+    if turn.core is not None and _observer_can_see(
+        turn.core.position,
+        target,
+        CORE_VISION_RADIUS,
+        obstacles,
+    ):
+        return True
+    return any(
+        _observer_can_see(
+            unit.position,
+            target,
+            UNIT_VISION_RADII[unit.unit_type],
+            obstacles,
+        )
+        for unit in turn.units
+    )
+
+
 def _ranger_line_range(start: Position, target: Position) -> int | None:
     dx = abs(target[0] - start[0])
     dy = abs(target[1] - start[1])
@@ -1349,6 +1444,54 @@ def _combat_target_key(origin: Position, enemy: object) -> tuple[object, ...]:
     )
 
 
+def _projected_combat_target_key(
+    origin: Position,
+    enemy: object,
+    planned_damage: Mapping[UUID, int],
+) -> tuple[object, ...]:
+    enemy_id = getattr(enemy, "id")
+    remaining_hp = max(
+        0,
+        getattr(enemy, "hp", 5) - planned_damage.get(enemy_id, 0),
+    )
+    return (
+        int(remaining_hp == 0),
+        _combat_target_key(origin, enemy),
+    )
+
+
+def _record_planned_target_damage(
+    target: object,
+    planned_damage: dict[UUID, int],
+) -> None:
+    target_id = getattr(target, "id")
+    planned_damage[target_id] = planned_damage.get(target_id, 0) + 1
+
+
+def _record_planned_cell_damage(
+    target_position: Position,
+    enemies: Sequence[object],
+    planned_damage: dict[UUID, int],
+) -> None:
+    for enemy in enemies:
+        if enemy.position == target_position:
+            _record_planned_target_damage(enemy, planned_damage)
+
+
+def _queue_ranger_attack(
+    ranger: object,
+    target: object,
+    visible_enemies: Sequence[object],
+) -> None:
+    occupants = sum(
+        enemy.position == target.position for enemy in visible_enemies
+    )
+    if occupants > 1:
+        ranger.shoot(target)
+    else:
+        ranger.shoot_cell(target.position)
+
+
 def _defense_post_directions(
     core_position: Position,
     enemies: Sequence[object],
@@ -1437,6 +1580,31 @@ def _uuid_sort_key(obj: object) -> bytes:
 
 def _unit_max_hp(unit_type: UnitType) -> int:
     return 4 if unit_type is UnitType.VANGUARD else 2
+
+
+def _projected_core_resources(turn: Turn) -> int:
+    plan = turn.plan.model_dump(mode="json", exclude_none=True)
+    unit_actions = plan.get("unit_actions", {})
+    depositing_ids = {
+        unit_id
+        for unit_id, action in unit_actions.items()
+        if action.get("type") == "DEPOSIT"
+    }
+    deposited = min(
+        turn.resource_space,
+        sum(
+            worker.cargo
+            for worker in turn.workers
+            if str(worker.id) in depositing_ids
+        ),
+    )
+    projected = turn.resources + deposited
+    healing_reserve = sum(
+        _unit_max_hp(unit.unit_type) - 1
+        for unit in turn.units
+        if unit_actions.get(str(unit.id), {}).get("type") == "HEAL"
+    )
+    return max(0, projected - healing_reserve)
 
 
 class CoreFarmer:
@@ -1562,13 +1730,18 @@ class CoreFarmer:
             self._release_core_observer()
 
     def _infer_core_observer(self, turn: Turn, enemy_core: object) -> UUID | None:
+        obstacles = set(self.known_obstacles) | set(turn.obstacle_cells)
         candidates = [
             worker
             for worker in turn.workers
             if worker.cargo == 0
             and worker.position not in turn.resource_cells
-            and _distance(worker.position, enemy_core.position)
-            <= CORE_OBSERVER_MAX_DISTANCE
+            and _observer_can_see(
+                worker.position,
+                enemy_core.position,
+                CORE_OBSERVER_MAX_DISTANCE,
+                obstacles,
+            )
         ]
         if not candidates:
             return None
@@ -1576,11 +1749,12 @@ class CoreFarmer:
             worker
             for worker in candidates
             if not self.worker_history.get(worker.id)
-            or _distance(
+            or not _observer_can_see(
                 self.worker_history[worker.id][-1],
                 enemy_core.position,
+                CORE_OBSERVER_MAX_DISTANCE,
+                obstacles,
             )
-            > CORE_OBSERVER_MAX_DISTANCE
         ]
         pool = newly_exposing or candidates
         return min(
@@ -2466,12 +2640,17 @@ class CoreFarmer:
             (
                 _distance(turn.core.position, enemy.position)
                 for enemy in turn.visible_enemies
+                if getattr(enemy, "kind", None) != "CORE"
+                and getattr(enemy, "unit_type", None)
+                in {UnitType.VANGUARD, UnitType.RANGER}
             ),
             default=None,
         )
         if (
             turn.tick >= self.recovery_until_tick
             and len(turn.workers) >= recovery_worker_goal
+            and len(turn.vanguards) >= EARLY_DEFENSE_VANGUARD_TARGET
+            and len(turn.rangers) >= EARLY_DEFENSE_RANGER_TARGET
             and turn.resources
             >= min(RECOVERY_MIN_RESOURCES, turn.resource_capacity)
             and (
@@ -2500,13 +2679,12 @@ class CoreFarmer:
         for cell in current_resources:
             self.resource_last_seen[cell] = turn.tick
 
-        friendly_positions = [unit.position for unit in turn.units]
-        if turn.core is not None:
-            friendly_positions.append(turn.core.position)
         for cell, last_seen in tuple(self.resource_last_seen.items()):
             expired = turn.tick - last_seen > RESOURCE_MEMORY_TTL
-            definitely_visible = any(
-                _distance(position, cell) <= 1 for position in friendly_positions
+            definitely_visible = _cell_visible_to_friendly(
+                turn,
+                cell,
+                self.known_obstacles,
             )
             if expired or (definitely_visible and cell not in current_resources):
                 self.resource_last_seen.pop(cell, None)
@@ -2902,6 +3080,7 @@ class CoreFarmer:
             <= current_distance
             <= CORE_OBSERVER_MAX_DISTANCE
             and worker.position not in context.danger_cells
+            and _has_vision_line(worker.position, target, context.obstacles)
         ):
             worker.wait()
             self._set_worker_mode(worker, "CORE_OBSERVER", target)
@@ -2924,6 +3103,12 @@ class CoreFarmer:
                     or watch_position in context.enemy_cells
                     or watch_position in context.danger_cells
                     or watch_position == context.core_position
+                    or not _observer_can_see(
+                        watch_position,
+                        target,
+                        CORE_OBSERVER_MAX_DISTANCE,
+                        context.obstacles,
+                    )
                 ):
                     continue
                 candidates.append(
@@ -3260,17 +3445,20 @@ class CoreFarmer:
             if self.worker_modes.get(worker_id) not in {"SCOUT", "SCOUT_BLOCKED"}:
                 self.scout_progress.pop(worker_id, None)
 
+        planned_damage: dict[UUID, int] = {}
         self._control_vanguards(
             turn,
             mobile_enemies,
             context,
             combat_target,
+            planned_damage,
         )
         self._control_rangers(
             turn,
             mobile_enemies,
             context,
             combat_target,
+            planned_damage,
         )
         self._control_core(turn, context, combat_target)
 
@@ -3461,6 +3649,7 @@ class CoreFarmer:
         enemies: Sequence[object],
         context: MovementContext,
         isolated_core_target: object | None,
+        planned_damage: dict[UUID, int],
     ) -> None:
         core = turn.core
         if core is None:
@@ -3495,11 +3684,20 @@ class CoreFarmer:
             if immediate_core_threats:
                 target = min(
                     immediate_core_threats,
-                    key=lambda enemy: _combat_target_key(vanguard.position, enemy),
+                    key=lambda enemy: _projected_combat_target_key(
+                        vanguard.position,
+                        enemy,
+                        planned_damage,
+                    ),
                 )
                 direction = _direction_to_adjacent(vanguard.position, target.position)
                 if direction is not None:
                     vanguard.sweep(direction)
+                    _record_planned_cell_damage(
+                        target.position,
+                        enemies,
+                        planned_damage,
+                    )
                     continue
             if self._healing_return_ready(turn, vanguard):
                 if vanguard.position == core.position:
@@ -3520,13 +3718,25 @@ class CoreFarmer:
                 and _distance(vanguard.position, enemy.position) == 1
             ]
             if pursuing_adjacent:
-                pursuer = min(pursuing_adjacent, key=_uuid_sort_key)
+                pursuer = min(
+                    pursuing_adjacent,
+                    key=lambda enemy: _projected_combat_target_key(
+                        vanguard.position,
+                        enemy,
+                        planned_damage,
+                    ),
+                )
                 direction = _direction_to_adjacent(
                     vanguard.position,
                     pursuer.position,
                 )
                 if direction is not None:
                     vanguard.sweep(direction)
+                    _record_planned_cell_damage(
+                        pursuer.position,
+                        enemies,
+                        planned_damage,
+                    )
                     continue
             strike_member = vanguard.id in strike_vanguards
             if strike_member:
@@ -3557,11 +3767,20 @@ class CoreFarmer:
             if self.combat_pressure_active and adjacent:
                 target = min(
                     adjacent,
-                    key=lambda enemy: _combat_target_key(vanguard.position, enemy),
+                    key=lambda enemy: _projected_combat_target_key(
+                        vanguard.position,
+                        enemy,
+                        planned_damage,
+                    ),
                 )
                 direction = _direction_to_adjacent(vanguard.position, target.position)
                 if direction is not None:
                     vanguard.sweep(direction)
+                    _record_planned_cell_damage(
+                        target.position,
+                        enemies,
+                        planned_damage,
+                    )
                     continue
             if self.combat_pressure_active:
                 target_position = _guard_post(
@@ -3598,11 +3817,20 @@ class CoreFarmer:
             if adjacent:
                 target = min(
                     adjacent,
-                    key=lambda enemy: _combat_target_key(vanguard.position, enemy),
+                    key=lambda enemy: _projected_combat_target_key(
+                        vanguard.position,
+                        enemy,
+                        planned_damage,
+                    ),
                 )
                 direction = _direction_to_adjacent(vanguard.position, target.position)
                 if direction is not None:
                     vanguard.sweep(direction)
+                    _record_planned_cell_damage(
+                        target.position,
+                        enemies,
+                        planned_damage,
+                    )
                     continue
 
             if nearby_enemies:
@@ -3640,6 +3868,7 @@ class CoreFarmer:
         enemies: Sequence[object],
         context: MovementContext,
         isolated_core_target: object | None,
+        planned_damage: dict[UUID, int],
     ) -> None:
         core = turn.core
         if core is None:
@@ -3679,9 +3908,14 @@ class CoreFarmer:
             if immediate_core_threats:
                 target = min(
                     immediate_core_threats,
-                    key=lambda enemy: _combat_target_key(ranger.position, enemy),
+                    key=lambda enemy: _projected_combat_target_key(
+                        ranger.position,
+                        enemy,
+                        planned_damage,
+                    ),
                 )
-                ranger.shoot_cell(target.position)
+                _queue_ranger_attack(ranger, target, turn.visible_enemies)
+                _record_planned_target_damage(target, planned_damage)
                 continue
             if self._healing_return_ready(turn, ranger):
                 if ranger.position == core.position:
@@ -3708,9 +3942,14 @@ class CoreFarmer:
             if pursuing_targets:
                 pursuer = min(
                     pursuing_targets,
-                    key=lambda enemy: _combat_target_key(ranger.position, enemy),
+                    key=lambda enemy: _projected_combat_target_key(
+                        ranger.position,
+                        enemy,
+                        planned_damage,
+                    ),
                 )
-                ranger.shoot_cell(pursuer.position)
+                _queue_ranger_attack(ranger, pursuer, turn.visible_enemies)
+                _record_planned_target_damage(pursuer, planned_damage)
                 continue
             strike_member = ranger.id in strike_rangers
             if strike_member:
@@ -3751,9 +3990,14 @@ class CoreFarmer:
             if self.combat_pressure_active and shootable:
                 target = min(
                     shootable,
-                    key=lambda enemy: _combat_target_key(ranger.position, enemy),
+                    key=lambda enemy: _projected_combat_target_key(
+                        ranger.position,
+                        enemy,
+                        planned_damage,
+                    ),
                 )
-                ranger.shoot_cell(target.position)
+                _queue_ranger_attack(ranger, target, turn.visible_enemies)
+                _record_planned_target_damage(target, planned_damage)
                 continue
             if self.combat_pressure_active:
                 target_position = _guard_post(
@@ -3790,9 +4034,14 @@ class CoreFarmer:
             if shootable:
                 target = min(
                     shootable,
-                    key=lambda enemy: _combat_target_key(ranger.position, enemy),
+                    key=lambda enemy: _projected_combat_target_key(
+                        ranger.position,
+                        enemy,
+                        planned_damage,
+                    ),
                 )
-                ranger.shoot_cell(target.position)
+                _queue_ranger_attack(ranger, target, turn.visible_enemies)
+                _record_planned_target_damage(target, planned_damage)
                 continue
 
             if nearby_enemies:
@@ -4069,6 +4318,7 @@ class CoreFarmer:
         worker_cost = unit_cost(UnitType.WORKER, population)
         vanguard_cost = unit_cost(UnitType.VANGUARD, population)
         ranger_cost = unit_cost(UnitType.RANGER, population)
+        available_resources = _projected_core_resources(turn)
         can_spawn = (
             not self.compatibility_hold
             and
@@ -4088,17 +4338,6 @@ class CoreFarmer:
         )
         cargo_waiting = self._should_wait_for_cargo(turn, context)
         if (
-            turn.resources >= 1
-            and core_survival_margin > 0
-            and (
-                (critical_core and core.hp < 5)
-                or projected_nonfatal_hp_damage
-            )
-        ):
-            core.heal()
-            return
-
-        if (
             retreat_enemies
             and nearest_threat is not None
             and (
@@ -4116,11 +4355,22 @@ class CoreFarmer:
         ):
             return
 
-        if core.hp < 5 and turn.resources >= 1 and core_survival_margin > 0:
+        if (
+            available_resources >= 1
+            and core_survival_margin > 0
+            and (
+                (critical_core and core.hp < 5)
+                or projected_nonfatal_hp_damage
+            )
+        ):
             core.heal()
             return
 
-        if core.shield < 5 and turn.resources >= 1:
+        if core.hp < 5 and available_resources >= 1 and core_survival_margin > 0:
+            core.heal()
+            return
+
+        if core.shield < 5 and available_resources >= 1:
             core.repair_shield()
             return
 
@@ -4147,7 +4397,7 @@ class CoreFarmer:
                 nearest_threat is not None
                 and nearest_threat <= 3
                 and len(turn.vanguards) < DEFENSE_VANGUARD_TARGET
-                and turn.resources >= vanguard_cost
+                and available_resources >= vanguard_cost
             ):
                 core.spawn(UnitType.VANGUARD)
                 return
@@ -4156,7 +4406,7 @@ class CoreFarmer:
                 and nearest_threat <= 6
                 and len(turn.workers) >= 4
                 and len(turn.rangers) < DEFENSE_RANGER_TARGET
-                and turn.resources >= ranger_cost
+                and available_resources >= ranger_cost
             ):
                 core.spawn(UnitType.RANGER)
                 return
@@ -4166,6 +4416,43 @@ class CoreFarmer:
             return
 
         if can_spawn:
+            economic_expansion_is_safe = (
+                nearest_threat is None or nearest_threat > 6
+            )
+            if self.recovery_mode and economic_expansion_is_safe:
+                vanguard_worker_goal = min(
+                    RECOVERY_VANGUARD_WORKER_GOAL,
+                    self.worker_target,
+                )
+                ranger_worker_goal = min(
+                    RECOVERY_RANGER_WORKER_GOAL,
+                    self.worker_target,
+                )
+                if len(turn.workers) < vanguard_worker_goal:
+                    if available_resources >= worker_cost:
+                        core.spawn(UnitType.WORKER)
+                    else:
+                        core.wait()
+                    return
+                if len(turn.vanguards) < EARLY_DEFENSE_VANGUARD_TARGET:
+                    if available_resources >= vanguard_cost:
+                        core.spawn(UnitType.VANGUARD)
+                    else:
+                        core.wait()
+                    return
+                if len(turn.workers) < ranger_worker_goal:
+                    if available_resources >= worker_cost:
+                        core.spawn(UnitType.WORKER)
+                    else:
+                        core.wait()
+                    return
+                if len(turn.rangers) < EARLY_DEFENSE_RANGER_TARGET:
+                    if available_resources >= ranger_cost:
+                        core.spawn(UnitType.RANGER)
+                    else:
+                        core.wait()
+                    return
+
             early_worker_goal = min(
                 EARLY_DEFENSE_WORKER_GOAL,
                 self.worker_target,
@@ -4177,7 +4464,7 @@ class CoreFarmer:
             if (
                 early_defense_is_safe
                 and len(turn.vanguards) < EARLY_DEFENSE_VANGUARD_TARGET
-                and turn.resources
+                and available_resources
                 >= EARLY_DEFENSE_RESERVE + vanguard_cost
             ):
                 core.spawn(UnitType.VANGUARD)
@@ -4186,7 +4473,7 @@ class CoreFarmer:
                 early_defense_is_safe
                 and len(turn.vanguards) >= EARLY_DEFENSE_VANGUARD_TARGET
                 and len(turn.rangers) < EARLY_DEFENSE_RANGER_TARGET
-                and turn.resources >= EARLY_DEFENSE_RESERVE + ranger_cost
+                and available_resources >= EARLY_DEFENSE_RESERVE + ranger_cost
             ):
                 core.spawn(UnitType.RANGER)
                 return
@@ -4204,12 +4491,9 @@ class CoreFarmer:
                     turn.resource_capacity,
                     population,
                 )
-            economic_expansion_is_safe = (
-                nearest_threat is None or nearest_threat > 6
-            )
             if (
                 len(turn.workers) < self.worker_target
-                and turn.resources >= expansion_threshold
+                and available_resources >= expansion_threshold
                 and economic_expansion_is_safe
             ):
                 core.spawn(UnitType.WORKER)
@@ -4218,10 +4502,10 @@ class CoreFarmer:
             mature_for_defense = (
                 len(turn.workers) >= self.worker_target
                 and nearest_threat is None
-                and turn.resources >= LONG_TERM_DEFENSE_RESERVE
+                and available_resources >= LONG_TERM_DEFENSE_RESERVE
             )
             if mature_for_defense and len(turn.vanguards) < DEFENSE_VANGUARD_TARGET:
-                if turn.resources >= LONG_TERM_DEFENSE_RESERVE + vanguard_cost:
+                if available_resources >= LONG_TERM_DEFENSE_RESERVE + vanguard_cost:
                     core.spawn(UnitType.VANGUARD)
                     return
             if (
@@ -4229,7 +4513,7 @@ class CoreFarmer:
                 and len(turn.vanguards) >= DEFENSE_VANGUARD_TARGET
                 and len(turn.rangers) < DEFENSE_RANGER_TARGET
             ):
-                if turn.resources >= LONG_TERM_DEFENSE_RESERVE + ranger_cost:
+                if available_resources >= LONG_TERM_DEFENSE_RESERVE + ranger_cost:
                     core.spawn(UnitType.RANGER)
                     return
 
@@ -4378,7 +4662,7 @@ def _reconcile_resource_turn(
 
 
 def _emit_resource_ledger(result: ResourceLedgerResult) -> None:
-    if result.actual_delta >= 0:
+    if result.actual_delta >= 0 and result.unexplained_loss == 0:
         return
     previous = result.previous
     prefix = (

@@ -4,7 +4,7 @@ import json
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -141,6 +141,132 @@ class VersionMonitorTests(unittest.TestCase):
             self.assertTrue(result["hold"])
             self.assertTrue(marker.exists())
             self.assertEqual(list(root.glob(".latest.json.*")), [])
+
+    def test_recent_compatible_baseline_tolerates_two_transient_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "hold.json"
+            report = root / "latest.json"
+            baseline = datetime(2026, 8, 6, tzinfo=UTC)
+            evaluate_versions(
+                installed_sdk=REVIEWED_SDK_VERSION,
+                pypi_sdk=REVIEWED_SDK_VERSION,
+                contract=MATCHING_CONTRACT,
+                marker_path=marker,
+                report_path=report,
+                now=baseline,
+            )
+
+            first = run_check(
+                marker_path=marker,
+                report_path=report,
+                client=FakeClient(page="<html>missing fields</html>"),
+                installed_sdk=REVIEWED_SDK_VERSION,
+                now=baseline + timedelta(hours=6),
+            )
+            second = run_check(
+                marker_path=marker,
+                report_path=report,
+                client=FakeClient(page="<html>missing fields</html>"),
+                installed_sdk=REVIEWED_SDK_VERSION,
+                now=baseline + timedelta(hours=12),
+            )
+
+            self.assertEqual(first["status"], "compatible")
+            self.assertEqual(second["status"], "compatible")
+            self.assertEqual(second["check_status"], "temporarily_failed")
+            self.assertEqual(second["consecutive_check_failures"], 2)
+            self.assertFalse(marker.exists())
+
+    def test_third_transient_failure_creates_hold(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "hold.json"
+            report = root / "latest.json"
+            baseline = datetime(2026, 8, 6, tzinfo=UTC)
+            evaluate_versions(
+                installed_sdk=REVIEWED_SDK_VERSION,
+                pypi_sdk=REVIEWED_SDK_VERSION,
+                contract=MATCHING_CONTRACT,
+                marker_path=marker,
+                report_path=report,
+                now=baseline,
+            )
+            result = None
+            for hours in (6, 12, 18):
+                result = run_check(
+                    marker_path=marker,
+                    report_path=report,
+                    client=FakeClient(page="<html>missing fields</html>"),
+                    installed_sdk=REVIEWED_SDK_VERSION,
+                    now=baseline + timedelta(hours=hours),
+                )
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result["status"], "check_failed")
+            self.assertEqual(result["consecutive_check_failures"], 3)
+            self.assertTrue(marker.exists())
+
+    def test_expired_compatible_baseline_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "hold.json"
+            report = root / "latest.json"
+            baseline = datetime(2026, 8, 6, tzinfo=UTC)
+            evaluate_versions(
+                installed_sdk=REVIEWED_SDK_VERSION,
+                pypi_sdk=REVIEWED_SDK_VERSION,
+                contract=MATCHING_CONTRACT,
+                marker_path=marker,
+                report_path=report,
+                now=baseline,
+            )
+
+            result = run_check(
+                marker_path=marker,
+                report_path=report,
+                client=FakeClient(page="<html>missing fields</html>"),
+                installed_sdk=REVIEWED_SDK_VERSION,
+                now=baseline + timedelta(hours=25),
+            )
+
+            self.assertEqual(result["status"], "check_failed")
+            self.assertTrue(marker.exists())
+
+    def test_success_resets_transient_failure_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "hold.json"
+            report = root / "latest.json"
+            baseline = datetime(2026, 8, 6, tzinfo=UTC)
+            evaluate_versions(
+                installed_sdk=REVIEWED_SDK_VERSION,
+                pypi_sdk=REVIEWED_SDK_VERSION,
+                contract=MATCHING_CONTRACT,
+                marker_path=marker,
+                report_path=report,
+                now=baseline,
+            )
+            run_check(
+                marker_path=marker,
+                report_path=report,
+                client=FakeClient(page="<html>missing fields</html>"),
+                installed_sdk=REVIEWED_SDK_VERSION,
+                now=baseline + timedelta(hours=6),
+            )
+
+            recovered = run_check(
+                marker_path=marker,
+                report_path=report,
+                client=FakeClient(),
+                installed_sdk=REVIEWED_SDK_VERSION,
+                now=baseline + timedelta(hours=7),
+            )
+
+            self.assertEqual(recovered["status"], "compatible")
+            self.assertEqual(recovered["check_status"], "ok")
+            self.assertEqual(recovered["consecutive_check_failures"], 0)
+            self.assertFalse(marker.exists())
 
 
 if __name__ == "__main__":

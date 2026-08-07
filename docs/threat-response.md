@@ -65,7 +65,9 @@ post-threat caution timer, does not by itself create an activity alert.
   retains legal harvesting, deposits, healing, shield repair, and emergency
   evasion.
 - `RECOVERY` clears battlefield memory, rebuilds locally after a replacement
-  Core, and remains compatible with simultaneous threat classification.
+  Core, and remains compatible with simultaneous threat classification. Safe
+  production advances through four Workers, one Vanguard, six Workers, and one
+  Ranger; nearby combat pressure still blocks economic expansion.
 
 ## Multi-Axis Breakout
 
@@ -103,6 +105,8 @@ enemy:
 - Rangers hold the inner two-cell screen;
 - active and confirmed-pursuit IDs receive axis priority;
 - a legal immediate attack takes precedence over repositioning;
+- same-Tick projected damage moves later defenders away from targets already
+  expected to die;
 - defenders do not chase beyond the protective posture.
 
 When every zero-risk route is gone, a defender counterattacks if it has a legal
@@ -160,7 +164,9 @@ Withdraw when any of the following is true:
   bounded mission distance;
 - the only available combat would turn defense into an unbounded chase.
 
-Rangers use target-free cell fire for a legal current cell. A shot at a moving
+Rangers normally use target-free cell fire for a legal current cell. When
+multiple hostiles occupy that cell, they use a precise target attack so the
+coordinated damage ledger matches the selected hostile. A shot at a moving
 Unit's remembered cell is not treated as certain. Stationary Core memory remains
 usable only under its separate repeated-observation contract.
 
