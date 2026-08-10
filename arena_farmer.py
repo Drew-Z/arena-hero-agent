@@ -4,21 +4,24 @@ import argparse
 import heapq
 import math
 import os
+import sqlite3
 import socket
 import sys
 import threading
 import time
 from collections import Counter, deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from enum import Enum
 from getpass import getpass
-from itertools import count
+from itertools import combinations, count, product
 from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
 from arena_health import write_heartbeat
+from arena_history import HistoryRecorder, visible_cells
 from arena_hero import (
     APIError,
     ArenaHeroClient,
@@ -42,39 +45,49 @@ DEFAULT_BASE_URL = "https://api.arenahero.io"
 DEFAULT_COMPATIBILITY_MARKER = Path(
     "/var/lib/arena-hero-version/compatibility-hold.json"
 )
-DEFAULT_WORKER_TARGET = 23
-DEFAULT_BEACON_POLICY = "retreat"
-BASE_WORKER_TARGET = 6
+FORCE_STAGES = (
+    (6, 2, 2),
+    (12, 6, 8),
+    (18, 14, 16),
+)
+DEFAULT_WORKER_TARGET = FORCE_STAGES[-1][0]
+DEFAULT_BEACON_POLICY = "pursue"
+BASE_WORKER_TARGET = FORCE_STAGES[0][0]
 CORE_RESOURCE_RESERVE = 10
-LATE_EXPANSION_RESERVE = 15
-EARLY_DEFENSE_WORKER_GOAL = 8
-EARLY_DEFENSE_RESERVE = 15
-LONG_TERM_DEFENSE_RESERVE = 15
-EARLY_DEFENSE_VANGUARD_TARGET = 1
-EARLY_DEFENSE_RANGER_TARGET = 1
-DEFENSE_VANGUARD_TARGET = 3
-DEFENSE_RANGER_TARGET = 4
-MATURE_DEFENSE_WORKER_GOAL = 12
-TARGET_POPULATION = 30
-GROWTH_POPULATION_MILESTONES = (20, 24, 29, TARGET_POPULATION)
-MAX_WORKER_TARGET = TARGET_POPULATION - DEFENSE_VANGUARD_TARGET - DEFENSE_RANGER_TARGET
+LATE_EXPANSION_RESERVE = 10
+EARLY_DEFENSE_WORKER_GOAL = FORCE_STAGES[0][0]
+EARLY_DEFENSE_RESERVE = 10
+LONG_TERM_DEFENSE_RESERVE = 10
+EARLY_DEFENSE_VANGUARD_TARGET = FORCE_STAGES[0][1]
+EARLY_DEFENSE_RANGER_TARGET = FORCE_STAGES[0][2]
+MATURE_DEFENSE_WORKER_GOAL = FORCE_STAGES[1][0]
+MID_FORCE_VANGUARD_TARGET = FORCE_STAGES[1][1]
+MID_FORCE_RANGER_TARGET = FORCE_STAGES[1][2]
+DEFENSE_VANGUARD_TARGET = FORCE_STAGES[-1][1]
+DEFENSE_RANGER_TARGET = FORCE_STAGES[-1][2]
+TARGET_POPULATION = sum(FORCE_STAGES[-1])
+MAX_WORKER_TARGET = FORCE_STAGES[-1][0]
 VANGUARD_GUARD_RADIUS = 3
 RANGER_GUARD_RADIUS = 2
 VANGUARD_CORE_GUARDS = 1
 RANGER_CORE_GUARDS = 1
+MATURE_VANGUARD_CORE_GUARDS = 2
+MATURE_RANGER_CORE_GUARDS = 2
+MATURE_GUARD_FLEET_MIN = 5
+ASSAULT_MIN_VANGUARDS = VANGUARD_CORE_GUARDS + 1
+ASSAULT_MIN_RANGERS = RANGER_CORE_GUARDS + 1
+MAIN_ASSAULT_MIN_VANGUARDS = VANGUARD_CORE_GUARDS + 3
+MAIN_ASSAULT_MIN_RANGERS = RANGER_CORE_GUARDS + 3
+MAIN_ASSAULT_RALLY_RADIUS = 5
+CORE_TARGET_DURABILITY_WEIGHT = 2
+CORE_TARGET_PROTECTOR_HP_WEIGHT = 3
 ISOLATED_CORE_CONFIRM_TICKS = 2
 CORE_VISIBILITY_GAP_TICKS = 2
-CORE_RAID_STRIKE_MAX_DISTANCE = 48
-CORE_RAID_STRIKE_RELEASE_DISTANCE = 56
-CORE_RAID_MEMORY_TTL = 16
+CORE_RAID_STRIKE_MAX_DISTANCE = 256
+CORE_RAID_STRIKE_RELEASE_DISTANCE = 320
+CORE_RAID_MEMORY_TTL = 256
 CORE_OBSERVER_MIN_DISTANCE = 2
 CORE_OBSERVER_MAX_DISTANCE = 3
-ISOLATED_CORE_MIN_RESOURCES = 5
-ISOLATED_CORE_MIN_RESOURCE_SPACE = 10
-STATIC_WORKER_CONFIRM_TICKS = 2
-STATIC_WORKER_CLEAR_MAX_DISTANCE = 16
-STATIC_WORKER_CLEAR_VANGUARDS = 2
-STATIC_WORKER_CLEAR_RANGERS = 2
 CORE_PROTECTOR_RADIUS = 5
 UNIT_HEAL_RESOURCE_RESERVE = 10
 POST_THREAT_CAUTION_TICKS = 8
@@ -113,7 +126,15 @@ CORE_EVADE_TRIGGER_DISTANCE = 12
 CORE_EVADE_RELEASE_DISTANCE = CORE_EVADE_TRIGGER_DISTANCE + 2
 CORE_MOVE_COMMIT_PROGRESS = 2
 UNIT_EVADE_TRIGGER_DISTANCE = 5
+ASSAULT_REINFORCEMENT_RADIUS = UNIT_EVADE_TRIGGER_DISTANCE
+FULL_ASSAULT_HOSTILE_COUNT = 4
+BEACON_CAMPAIGN_POPULATION = 40
+BEACON_CAMPAIGN_RESOURCES = 30
+BEACON_RETURN_RADIUS = 3
 RETREAT_MIN_BEACON_DISTANCE = 224
+COMBAT_PATROL_INITIAL_RADIUS = 24
+COMBAT_PATROL_GROWTH_TICKS = 64
+COMBAT_PATROL_RING_STEP = 8
 RETREAT_SERVICE_TICKS = 8
 SIGNED_INT64_MIN = -(2**63)
 SIGNED_INT64_MAX = 2**63 - 1
@@ -398,6 +419,30 @@ def _distance(left: Position, right: Position) -> int:
     return abs(left[0] - right[0]) + abs(left[1] - right[1])
 
 
+def _core_guard_ids(turn: Turn) -> tuple[set[UUID], set[UUID]]:
+    core = turn.core
+    if core is None:
+        return set(), set()
+
+    def nearest(units: Sequence[object], mature_count: int) -> set[UUID]:
+        count = mature_count if len(units) >= MATURE_GUARD_FLEET_MIN else 1
+        return {
+            unit.id
+            for unit in sorted(
+                units,
+                key=lambda unit: (
+                    _distance(unit.position, core.position),
+                    _uuid_sort_key(unit),
+                ),
+            )[:count]
+        }
+
+    return (
+        nearest(turn.vanguards, MATURE_VANGUARD_CORE_GUARDS),
+        nearest(turn.rangers, MATURE_RANGER_CORE_GUARDS),
+    )
+
+
 def _core_raid_strike_distance(
     position: Position,
     vanguards: Sequence[object],
@@ -619,6 +664,7 @@ def _path_directions(
     blocked: set[Position],
     *,
     discouraged: set[Position] | None = None,
+    target_radius: int = 0,
     max_expansions: int = 4096,
 ) -> tuple[Direction, ...]:
     if start == target:
@@ -628,13 +674,22 @@ def _path_directions(
     blocked.discard(start)
     discouraged = set(discouraged or ())
     discouraged.discard(start)
-    goals = {target}
-    if target in blocked:
+    if target_radius:
+        goals = {
+            (target[0] + dx, target[1] + dy)
+            for dx in range(-target_radius, target_radius + 1)
+            for dy in range(-target_radius, target_radius + 1)
+            if abs(dx) + abs(dy) <= target_radius
+            and (target[0] + dx, target[1] + dy) not in blocked
+        }
+    elif target in blocked:
         goals = {
             _destination(target, direction)
             for direction in CARDINAL_DIRECTIONS
             if _destination(target, direction) not in blocked
         }
+    else:
+        goals = {target}
     if not goals or start in goals:
         return ()
 
@@ -893,6 +948,8 @@ def _queue_core_defender_egress(
     context: MovementContext,
     enemies: Sequence[object],
     healing_holds: set[UUID] | None = None,
+    *,
+    force_departure: bool = False,
 ) -> set[UUID]:
     """Move a defender off the Core before Workers plan their deliveries."""
     core = turn.core
@@ -931,7 +988,7 @@ def _queue_core_defender_egress(
         )
         for enemy in core_threats
     )
-    if can_counter_core_threat:
+    if can_counter_core_threat and not force_departure:
         return set()
 
     imminent_cargo = any(
@@ -941,7 +998,8 @@ def _queue_core_defender_egress(
     )
     missing_hp = _unit_max_hp(defender.unit_type) - defender.hp
     if (
-        healing_holds is not None
+        not force_departure
+        and healing_holds is not None
         and defender.id in healing_holds
         and missing_hp > 0
         and not imminent_cargo
@@ -1001,6 +1059,8 @@ def _queue_core_defender_egress(
 def _queue_core_delivery_handoff(
     turn: Turn,
     context: MovementContext,
+    *,
+    force_departure: bool = False,
 ) -> set[UUID]:
     """Break a full Core cell by shifting a friendly corridor from outside in."""
     core = turn.core
@@ -1011,7 +1071,11 @@ def _queue_core_delivery_handoff(
             worker
             for worker in turn.workers
             if worker.position == core.position
-            and (worker.cargo == 0 or turn.resource_space == 0)
+            and (
+                force_departure
+                or worker.cargo == 0
+                or turn.resource_space == 0
+            )
         ),
         key=_uuid_sort_key,
     )
@@ -1029,7 +1093,29 @@ def _queue_core_delivery_handoff(
         if destination in context.enemy_cells or destination in context.danger_cells:
             continue
         passable_neighbors.append((direction, destination))
-    if not passable_neighbors or any(
+    if not passable_neighbors:
+        return set()
+    if force_departure:
+        directions = tuple(
+            direction
+            for direction, position in sorted(
+                passable_neighbors,
+                key=lambda item: (
+                    context.friendly_counts[item[1]],
+                    int(item[1] == context.delivery_lane),
+                    CARDINAL_DIRECTIONS.index(item[0]),
+                ),
+            )
+            if context.friendly_counts[position] < 2
+        )
+        if _queue_move(
+            departing_worker,
+            directions,
+            context,
+            allow_single_friendly_transit=True,
+        ):
+            return {departing_worker.id}
+    if any(
         context.friendly_counts[position] == 0
         for _, position in passable_neighbors
     ):
@@ -1118,6 +1204,7 @@ def _queue_core_delivery_handoff(
         (
             worker
             for worker in turn.workers
+            if not force_departure
             if turn.resource_space > 0
             and worker.cargo > 0
             and worker.id not in handoff
@@ -1147,6 +1234,7 @@ def _queue_toward(
     allow_single_friendly_transit: bool = False,
     discouraged: set[Position] | None = None,
     avoid_danger: bool = True,
+    target_radius: int = 0,
 ) -> bool:
     blocked = (
         set(context.obstacles)
@@ -1177,6 +1265,7 @@ def _queue_toward(
         target,
         blocked,
         discouraged=combined_discouraged,
+        target_radius=target_radius,
     )
     if not directions:
         return False
@@ -1412,47 +1501,91 @@ def _defense_post_directions(
     )
 
 
-def _worker_expansion_threshold(
-    worker_count: int,
-    worker_target: int,
-    resource_capacity: int,
-    population: int,
-) -> int:
-    if worker_count < BASE_WORKER_TARGET:
-        return min(
-            CORE_RESOURCE_RESERVE + unit_cost(UnitType.WORKER, population),
-            resource_capacity,
-        )
-
-    if worker_count < MATURE_DEFENSE_WORKER_GOAL:
-        completed_late_stages = (worker_count - BASE_WORKER_TARGET) // 2
-        stage_target = min(
-            worker_target,
-            BASE_WORKER_TARGET + 2 * (completed_late_stages + 1),
-        )
-        remaining_units = max(1, stage_target - worker_count)
-        return LATE_EXPANSION_RESERVE + sum(
-            unit_cost(UnitType.WORKER, population + offset)
-            for offset in range(remaining_units)
-        )
-
-    target_population = min(
-        TARGET_POPULATION,
-        worker_target + DEFENSE_VANGUARD_TARGET + DEFENSE_RANGER_TARGET,
+def _core_target_score(
+    turn: Turn,
+    enemy_core: object,
+    strike_distance: int,
+) -> tuple[object, ...]:
+    protector_hp = sum(
+        enemy.hp
+        for enemy in turn.visible_enemies
+        if getattr(enemy, "kind") != "CORE"
+        and enemy.unit_type in {UnitType.VANGUARD, UnitType.RANGER}
+        and _distance(enemy.position, enemy_core.position) <= CORE_PROTECTOR_RADIUS
     )
-    next_milestone = next(
-        (
-            milestone
-            for milestone in GROWTH_POPULATION_MILESTONES
-            if population < milestone
+    durability = enemy_core.hp + enemy_core.shield
+    score = (
+        strike_distance
+        + durability * CORE_TARGET_DURABILITY_WEIGHT
+        + protector_hp * CORE_TARGET_PROTECTOR_HP_WEIGHT
+    )
+    return score, strike_distance, _uuid_sort_key(enemy_core)
+
+
+def _strike_rally_position(
+    units: Sequence[object],
+    target: Position,
+) -> Position | None:
+    if not units:
+        return None
+    positions = tuple(unit.position for unit in units)
+    return min(
+        positions,
+        key=lambda position: (
+            sum(_distance(position, other) for other in positions),
+            _distance(position, target),
+            position,
         ),
-        target_population,
     )
-    stage_target = min(target_population, next_milestone)
-    remaining_units = max(1, stage_target - population)
-    return LATE_EXPANSION_RESERVE + sum(
-        unit_cost(UnitType.WORKER, population + offset)
-        for offset in range(remaining_units)
+
+
+def _force_stage_targets(
+    worker_target: int,
+    workers: int,
+    vanguards: int,
+    rangers: int,
+) -> tuple[int, int, int]:
+    for stage_workers, stage_vanguards, stage_rangers in FORCE_STAGES:
+        targets = (
+            min(worker_target, stage_workers),
+            stage_vanguards,
+            stage_rangers,
+        )
+        if any(
+            current < target
+            for current, target in zip(
+                (workers, vanguards, rangers),
+                targets,
+            )
+        ):
+            return targets
+    return worker_target, DEFENSE_VANGUARD_TARGET, DEFENSE_RANGER_TARGET
+
+
+def _next_force_unit_type(
+    worker_target: int,
+    workers: int,
+    vanguards: int,
+    rangers: int,
+) -> UnitType | None:
+    target_workers, target_vanguards, target_rangers = _force_stage_targets(
+        worker_target,
+        workers,
+        vanguards,
+        rangers,
+    )
+    if workers < target_workers:
+        return UnitType.WORKER
+    if vanguards >= target_vanguards and rangers >= target_rangers:
+        return None
+    if vanguards >= target_vanguards:
+        return UnitType.RANGER
+    if rangers >= target_rangers:
+        return UnitType.VANGUARD
+    return (
+        UnitType.VANGUARD
+        if vanguards * target_rangers <= rangers * target_vanguards
+        else UnitType.RANGER
     )
 
 
@@ -1525,10 +1658,13 @@ class CoreFarmer:
         self.healing_defender_ids: set[UUID] = set()
         self.stationary_core_memory: dict[UUID, EnemyCoreSighting] = {}
         self.isolated_core_target_id: UUID | None = None
+        self.core_raid_rally_position: Position | None = None
+        self.core_raid_launched = False
         self.core_observer_candidates: dict[UUID, UUID] = {}
         self.core_observer_target_id: UUID | None = None
         self.core_raid_spotter_id: UUID | None = None
         self.stationary_unit_target_id: UUID | None = None
+        self.beacon_runner_id: UUID | None = None
         self.threat_caution_until_tick = 0
         self.startup_tick: int | None = None
 
@@ -1547,26 +1683,20 @@ class CoreFarmer:
             self.isolated_core_target_id is not None
             or self.stationary_unit_target_id is not None
         ):
-            return "CLEAR_CORE"
-        early_worker_goal = min(EARLY_DEFENSE_WORKER_GOAL, self.worker_target)
-        if len(turn.workers) < early_worker_goal:
-            return "EXPANSION"
-        if (
-            len(turn.vanguards) < EARLY_DEFENSE_VANGUARD_TARGET
-            or len(turn.rangers) < EARLY_DEFENSE_RANGER_TARGET
-        ):
-            return "FORTIFY"
-        mature_worker_goal = min(MATURE_DEFENSE_WORKER_GOAL, self.worker_target)
-        if len(turn.workers) < mature_worker_goal:
-            return "EXPANSION"
-        if (
-            len(turn.vanguards) < DEFENSE_VANGUARD_TARGET
-            or len(turn.rangers) < DEFENSE_RANGER_TARGET
-        ):
-            return "FORTIFY"
-        if len(turn.workers) < self.worker_target:
-            return "EXPANSION"
-        return "STOCKPILE"
+            return "ASSAULT"
+        next_unit = _next_force_unit_type(
+            self.worker_target,
+            len(turn.workers),
+            len(turn.vanguards),
+            len(turn.rangers),
+        )
+        if next_unit is UnitType.WORKER:
+            return "MOBILIZE_ECONOMY"
+        if next_unit is not None:
+            return "MOBILIZE_ARMY"
+        if self.beacon_runner_id is not None:
+            return "BEACON_CAMPAIGN"
+        return "EXPAND_CONTROL"
 
     def _refresh_compatibility_hold(self) -> None:
         if self.compatibility_marker is None:
@@ -1584,6 +1714,8 @@ class CoreFarmer:
     def _release_core_raid(self, *, forget_position: bool = False) -> None:
         target_id = self.isolated_core_target_id
         self.isolated_core_target_id = None
+        self.core_raid_rally_position = None
+        self.core_raid_launched = False
         if target_id is not None and forget_position:
             self.stationary_core_memory.pop(target_id, None)
             self.core_observer_candidates.pop(target_id, None)
@@ -1622,15 +1754,6 @@ class CoreFarmer:
                 _uuid_sort_key(worker),
             ),
         ).id
-
-    @staticmethod
-    def _core_is_protected(turn: Turn, position: Position) -> bool:
-        return any(
-            getattr(enemy, "kind") != "CORE"
-            and enemy.unit_type in {UnitType.VANGUARD, UnitType.RANGER}
-            and _distance(enemy.position, position) <= CORE_PROTECTOR_RADIUS
-            for enemy in turn.visible_enemies
-        )
 
     def _assess_threat(
         self,
@@ -2246,41 +2369,23 @@ class CoreFarmer:
         if (
             core is None
             or self.recovery_mode
-        ):
-            self._release_core_raid()
-            return None
-        if core.hp < 5 or core.shield < 5:
-            self._release_core_raid()
-            return None
-        if turn.resources < ISOLATED_CORE_MIN_RESOURCES:
-            self._release_core_raid()
-            return None
-        if turn.resource_space < ISOLATED_CORE_MIN_RESOURCE_SPACE:
-            self._release_core_raid()
-            return None
-        if (
-            len(turn.vanguards) < STATIC_WORKER_CLEAR_VANGUARDS
-            or len(turn.rangers) < STATIC_WORKER_CLEAR_RANGERS
-        ):
-            self._release_core_raid()
-            return None
-        if any(
-            defender.hp < _unit_max_hp(defender.unit_type)
-            for defender in (*turn.vanguards, *turn.rangers)
+            or len(turn.vanguards) < ASSAULT_MIN_VANGUARDS
+            or len(turn.rangers) < ASSAULT_MIN_RANGERS
         ):
             self._release_core_raid()
             return None
 
+        guard_vanguards, guard_rangers = _core_guard_ids(turn)
         vanguard_strike_group = tuple(
-            sorted(turn.vanguards, key=_uuid_sort_key)[
-                VANGUARD_CORE_GUARDS:DEFENSE_VANGUARD_TARGET
-            ]
-        )
+            unit
+            for unit in sorted(turn.vanguards, key=_uuid_sort_key)
+            if unit.id not in guard_vanguards
+        )[:DEFENSE_VANGUARD_TARGET]
         ranger_strike_group = tuple(
-            sorted(turn.rangers, key=_uuid_sort_key)[
-                RANGER_CORE_GUARDS:DEFENSE_RANGER_TARGET
-            ]
-        )
+            unit
+            for unit in sorted(turn.rangers, key=_uuid_sort_key)
+            if unit.id not in guard_rangers
+        )[:DEFENSE_RANGER_TARGET]
         visible_cores = {
             enemy.id: enemy
             for enemy in turn.visible_enemies
@@ -2291,57 +2396,54 @@ class CoreFarmer:
             target_id = self.isolated_core_target_id
             remembered = self.stationary_core_memory.get(target_id)
             visible_target = visible_cores.get(target_id)
-            if (
+            if visible_target is not None:
+                sighting = self.enemy_core_sightings.get(target_id)
+                remembered = EnemyCoreSighting(
+                    position=visible_target.position,
+                    first_tick=(
+                        sighting.first_tick
+                        if sighting is not None
+                        else turn.tick
+                    ),
+                    last_tick=turn.tick,
+                    observations=(
+                        sighting.observations
+                        if sighting is not None
+                        else 1
+                    ),
+                )
+                self.stationary_core_memory[target_id] = remembered
+            release_target = (
                 remembered is None
                 or turn.tick - remembered.last_tick > CORE_RAID_MEMORY_TTL
-                or self._core_is_protected(turn, remembered.position)
-                or (
-                    visible_target is not None
-                    and (
-                        visible_target.state is not CoreState.NORMAL
-                        or visible_target.position != remembered.position
-                    )
-                )
                 or _core_raid_strike_distance(
                     remembered.position,
                     vanguard_strike_group,
                     ranger_strike_group,
                 )
                 > CORE_RAID_STRIKE_RELEASE_DISTANCE
-            ):
-                self._release_core_raid()
-                return None
-            if visible_target is None and any(
-                _distance(defender.position, remembered.position) <= 1
-                for defender in (*vanguard_strike_group, *ranger_strike_group)
-            ):
-                self._release_core_raid(forget_position=True)
-                return None
-            return CoreRaidTarget(
-                id=target_id,
-                position=remembered.position,
-                visible_enemy=visible_target,
             )
+            forget_position = False
+            if visible_target is None and remembered is not None:
+                current_visible_cells = visible_cells(
+                    turn.state.model_dump(mode="json", exclude_none=True)
+                )
+                forget_position = remembered.position in current_visible_cells
+                release_target = release_target or forget_position or bool(
+                    visible_cores
+                )
+            if release_target:
+                self._release_core_raid(forget_position=forget_position)
+            else:
+                assert remembered is not None
+                return CoreRaidTarget(
+                    id=target_id,
+                    position=remembered.position,
+                    visible_enemy=visible_target,
+                )
 
         candidates = []
         for enemy_core in visible_cores.values():
-            sighting = self.enemy_core_sightings.get(enemy_core.id)
-            if sighting is None:
-                continue
-            if enemy_core.state is not CoreState.NORMAL:
-                continue
-            remembered = self.stationary_core_memory.get(enemy_core.id)
-            confirmed_at_same_position = (
-                remembered is not None
-                and remembered.position == enemy_core.position
-            )
-            if (
-                sighting.observations < ISOLATED_CORE_CONFIRM_TICKS + 1
-                and not confirmed_at_same_position
-            ):
-                continue
-            if self._core_is_protected(turn, enemy_core.position):
-                continue
             strike_distance = _core_raid_strike_distance(
                 enemy_core.position,
                 vanguard_strike_group,
@@ -2351,17 +2453,30 @@ class CoreFarmer:
                 continue
             candidates.append(
                 (
-                    strike_distance,
-                    _distance(core.position, enemy_core.position),
-                    _uuid_sort_key(enemy_core),
+                    _core_target_score(turn, enemy_core, strike_distance),
                     enemy_core,
                 )
             )
 
         if not candidates:
             return None
-        target = min(candidates)[3]
+        target = min(candidates, key=lambda candidate: candidate[0])[1]
+        sighting = self.enemy_core_sightings.get(target.id)
+        self.stationary_core_memory[target.id] = EnemyCoreSighting(
+            position=target.position,
+            first_tick=sighting.first_tick if sighting is not None else turn.tick,
+            last_tick=turn.tick,
+            observations=sighting.observations if sighting is not None else 1,
+        )
         self.isolated_core_target_id = target.id
+        self.core_raid_rally_position = _strike_rally_position(
+            (*vanguard_strike_group, *ranger_strike_group),
+            target.position,
+        )
+        self.core_raid_launched = (
+            len(turn.vanguards) < MAIN_ASSAULT_MIN_VANGUARDS
+            or len(turn.rangers) < MAIN_ASSAULT_MIN_RANGERS
+        )
         observer_id = self.core_observer_candidates.get(target.id)
         living_empty_workers = {
             worker.id
@@ -2379,19 +2494,11 @@ class CoreFarmer:
         )
 
     def _stationary_enemy_units(self, turn: Turn) -> tuple[object, ...]:
-        units = []
-        for enemy in turn.visible_enemies:
-            if getattr(enemy, "kind") == "CORE":
-                continue
-            sighting = self.enemy_unit_sightings.get(enemy.id)
-            if (
-                sighting is not None
-                and sighting.position == enemy.position
-                and sighting.last_tick == turn.tick
-                and turn.tick - sighting.first_tick >= STATIC_WORKER_CONFIRM_TICKS
-            ):
-                units.append(enemy)
-        return tuple(units)
+        return tuple(
+            enemy
+            for enemy in turn.visible_enemies
+            if getattr(enemy, "kind") != "CORE"
+        )
 
     def _select_stationary_unit_target(
         self,
@@ -2403,25 +2510,13 @@ class CoreFarmer:
         if (
             core is None
             or self.recovery_mode
-            or core.hp < 5
-            or core.shield < 5
-            or len(turn.vanguards) < STATIC_WORKER_CLEAR_VANGUARDS
-            or len(turn.rangers) < STATIC_WORKER_CLEAR_RANGERS
+            or (
+                len(turn.vanguards) <= VANGUARD_CORE_GUARDS
+                and len(turn.rangers) <= RANGER_CORE_GUARDS
+            )
         ):
             return None
-        candidates = [
-            unit
-            for unit in stationary_units
-            if _distance(core.position, unit.position)
-            <= STATIC_WORKER_CLEAR_MAX_DISTANCE
-            and not any(
-                getattr(other, "kind") != "CORE"
-                and other.id != unit.id
-                and other.unit_type in {UnitType.VANGUARD, UnitType.RANGER}
-                and _distance(other.position, unit.position) <= CORE_PROTECTOR_RADIUS
-                for other in turn.visible_enemies
-            )
-        ]
+        candidates = list(stationary_units)
         if not candidates:
             return None
         target = min(
@@ -2993,10 +3088,7 @@ class CoreFarmer:
         self.known_obstacles.update(turn.obstacle_cells)
         self._refresh_threat_assessment(turn)
         self.stationary_unit_target_id = None
-        active_raid_target = self._active_raid_target_for_recall()
-        if self.combat_pressure_active and active_raid_target is not None:
-            self._recall_strike_group(turn, active_raid_target)
-        if self.compatibility_hold or self.combat_pressure_active:
+        if self.compatibility_hold:
             self._release_core_raid()
             self._release_core_observer()
             isolated_core_target = None
@@ -3005,7 +3097,6 @@ class CoreFarmer:
         stationary_unit_target = None
         if (
             not self.compatibility_hold
-            and not self.combat_pressure_active
             and isolated_core_target is None
         ):
             stationary_candidates = self._stationary_enemy_units(turn)
@@ -3030,16 +3121,11 @@ class CoreFarmer:
             combat_target,
             mobile_enemies,
         ):
-            self._recall_strike_group(turn, combat_target)
-            self._release_core_raid()
-            self._release_core_observer()
-            self.stationary_unit_target_id = None
-            combat_target = None
-            observer_position = None
             self._refresh_threat_assessment(
                 turn,
                 local_squad_contact=True,
             )
+        self._select_beacon_runner(turn, combat_target)
         enemy_cells = {enemy.position for enemy in enemies}
         danger_cells = _enemy_threat_cells(enemies, self.known_obstacles)
         self.last_danger_cells = danger_cells
@@ -3067,6 +3153,25 @@ class CoreFarmer:
             preplanned_units=set(),
         )
         context.delivery_lane = _select_delivery_lane(context)
+        breakout = _is_multi_axis_breakout(
+            core.position,
+            mobile_enemies,
+            context.obstacles,
+            self._core_blocked_cells(turn, context),
+        )
+        if breakout:
+            self._refresh_threat_assessment(turn, breakout=True)
+        nearest_visible_threat = min(
+            (_distance(core.position, enemy.position) for enemy in mobile_enemies),
+            default=None,
+        )
+        if self._core_defense_active(nearest_visible_threat):
+            threat_count = max(
+                1,
+                len(self.threat_assessment.near_core_enemy_ids),
+                len(self.recent_attack_threats),
+            )
+            self._recall_core_defenders(turn, threat_count)
 
         workers = sorted(turn.workers, key=_uuid_sort_key)
         self.worker_modes.clear()
@@ -3099,6 +3204,20 @@ class CoreFarmer:
             for defender in (*turn.vanguards, *turn.rangers)
             if self._healing_return_ready(turn, defender)
         }
+        retreat_enemies = mobile_enemies + self._remembered_retreat_threats(
+            turn,
+            mobile_enemies,
+        )
+        spawn_reservation = self._spawn_reservation(
+            turn,
+            combat_target,
+            retreat_enemies,
+        )
+        reserve_core_for_spawn = spawn_reservation is not None
+        raid_launched = self._refresh_core_raid_launch(
+            turn,
+            isolated_core_target,
+        )
         observer_id = (
             self.core_raid_spotter_id
             if observer_position is not None
@@ -3112,8 +3231,15 @@ class CoreFarmer:
             context,
             mobile_enemies,
             healing_holds,
+            force_departure=reserve_core_for_spawn,
         )
-        preplanned_units.update(_queue_core_delivery_handoff(turn, context))
+        preplanned_units.update(
+            _queue_core_delivery_handoff(
+                turn,
+                context,
+                force_departure=reserve_core_for_spawn,
+            )
+        )
         context.preplanned_units = preplanned_units
         for worker in workers:
             if worker.id not in preplanned_units:
@@ -3142,6 +3268,7 @@ class CoreFarmer:
             blocked=resource_route_blocked,
         )
         current_resources = set(turn.resource_cells)
+        allow_core_delivery = turn.resource_space > 0 and not reserve_core_for_spawn
         departing_core_workers = [
             worker for worker in empty_workers if worker.position == core.position
         ]
@@ -3237,8 +3364,8 @@ class CoreFarmer:
                 worker,
                 core.position,
                 context,
-                allow_core_entry=turn.resource_space > 0,
-                allow_single_friendly_transit=turn.resource_space > 0,
+                allow_core_entry=allow_core_delivery,
+                allow_single_friendly_transit=allow_core_delivery,
             )
             if not moved:
                 worker.wait()
@@ -3294,14 +3421,76 @@ class CoreFarmer:
             mobile_enemies,
             context,
             combat_target,
+            raid_launched=raid_launched,
+            reserve_core_for_spawn=reserve_core_for_spawn,
         )
         self._control_rangers(
             turn,
             mobile_enemies,
             context,
             combat_target,
+            raid_launched=raid_launched,
+            reserve_core_for_spawn=reserve_core_for_spawn,
         )
         self._control_core(turn, context, combat_target)
+
+    def _beacon_campaign_ready(self, turn: Turn, target: object | None) -> bool:
+        core = turn.core
+        guard_vanguards, _ = _core_guard_ids(turn)
+        return bool(
+            self.beacon_policy == "pursue"
+            and target is None
+            and core is not None
+            and core.view.state is CoreState.NORMAL
+            and core.hp == 5
+            and core.shield >= 5
+            and len(turn.units) >= BEACON_CAMPAIGN_POPULATION
+            and turn.resources >= BEACON_CAMPAIGN_RESOURCES
+            and len(turn.vanguards) > len(guard_vanguards)
+            and not self.threat_assessment.recent_core_attack
+            and not self.threat_assessment.threatening_core_enemy_ids
+        )
+
+    def _select_beacon_runner(self, turn: Turn, target: object | None) -> None:
+        if not self._beacon_campaign_ready(turn, target):
+            self.beacon_runner_id = None
+            return
+        guard_vanguards, _ = _core_guard_ids(turn)
+        candidates = [
+            unit
+            for unit in sorted(turn.vanguards, key=_uuid_sort_key)
+            if unit.id not in guard_vanguards
+        ]
+        living_ids = {unit.id for unit in candidates}
+        if self.beacon_runner_id in living_ids:
+            return
+        self.beacon_runner_id = min(
+            candidates,
+            key=lambda unit: (
+                _distance(unit.position, turn.beacon.position),
+                _uuid_sort_key(unit),
+            ),
+        ).id
+
+    def _combat_patrol_target(
+        self,
+        turn: Turn,
+        unit: object,
+        index: int,
+    ) -> Position:
+        core = turn.core
+        if core is None:
+            return unit.position
+        elapsed = max(0, turn.tick - (self.startup_tick or turn.tick))
+        radius = (
+            COMBAT_PATROL_INITIAL_RADIUS
+            + elapsed // COMBAT_PATROL_GROWTH_TICKS * COMBAT_PATROL_RING_STEP
+        )
+        vector = SCOUT_VECTORS[(unit.id.int + index) % len(SCOUT_VECTORS)]
+        return (
+            core.position[0] + vector[0] * radius,
+            core.position[1] + vector[1] * radius,
+        )
 
     @staticmethod
     def _strike_group_ids(
@@ -3310,35 +3499,143 @@ class CoreFarmer:
     ) -> tuple[set[UUID], set[UUID]]:
         if target is None:
             return set(), set()
-        vanguards = sorted(turn.vanguards, key=_uuid_sort_key)
-        rangers = sorted(turn.rangers, key=_uuid_sort_key)
+        guard_vanguards, guard_rangers = _core_guard_ids(turn)
+        available_vanguards = sorted(
+            (
+                unit
+                for unit in turn.vanguards
+                if unit.id not in guard_vanguards
+            ),
+            key=lambda unit: (
+                _distance(unit.position, target.position),
+                _uuid_sort_key(unit),
+            ),
+        )
+        available_rangers = sorted(
+            (
+                unit
+                for unit in turn.rangers
+                if unit.id not in guard_rangers
+            ),
+            key=lambda unit: (
+                _distance(unit.position, target.position),
+                _uuid_sort_key(unit),
+            ),
+        )
         if isinstance(target, CoreRaidTarget):
             return (
-                {
-                    unit.id
-                    for unit in vanguards[
-                        VANGUARD_CORE_GUARDS:DEFENSE_VANGUARD_TARGET
-                    ]
-                },
-                {
-                    unit.id
-                    for unit in rangers[RANGER_CORE_GUARDS:DEFENSE_RANGER_TARGET]
-                },
+                {unit.id for unit in available_vanguards},
+                {unit.id for unit in available_rangers},
             )
 
-        ranger_count = min(2, max(1, len(rangers) - 2))
-        ranger_strikers = rangers[-ranger_count:]
-        remaining_damage = max(0, getattr(target, "hp", 1) - len(ranger_strikers))
-        vanguard_count = min(
-            max(0, remaining_damage),
-            max(1, len(vanguards) - 2),
+        local_hostiles = sum(
+            getattr(enemy, "kind", None) != "CORE"
+            and getattr(enemy, "unit_type", None)
+            in {UnitType.VANGUARD, UnitType.RANGER}
+            and _distance(enemy.position, target.position)
+            <= ASSAULT_REINFORCEMENT_RADIUS
+            for enemy in turn.visible_enemies
         )
-        return (
-            {unit.id for unit in vanguards[-vanguard_count:]}
-            if vanguard_count
-            else set(),
-            {unit.id for unit in ranger_strikers},
+        if local_hostiles >= FULL_ASSAULT_HOSTILE_COUNT:
+            return (
+                {unit.id for unit in available_vanguards},
+                {unit.id for unit in available_rangers},
+            )
+
+        pair_count = max(1, local_hostiles)
+        selected_vanguards: set[UUID] = set()
+        selected_rangers: set[UUID] = set()
+        for _ in range(pair_count):
+            if available_vanguards and available_rangers:
+                vanguard, ranger = min(
+                    product(available_vanguards, available_rangers),
+                    key=lambda pair: (
+                        max(
+                            _distance(pair[0].position, target.position),
+                            _distance(pair[1].position, target.position),
+                        ),
+                        _distance(pair[0].position, pair[1].position),
+                        _uuid_sort_key(pair[0]),
+                        _uuid_sort_key(pair[1]),
+                    ),
+                )
+                available_vanguards.remove(vanguard)
+                available_rangers.remove(ranger)
+                selected_vanguards.add(vanguard.id)
+                selected_rangers.add(ranger.id)
+                continue
+            if len(available_rangers) >= 2:
+                pair = min(
+                    combinations(available_rangers, 2),
+                    key=lambda units: (
+                        max(
+                            _distance(units[0].position, target.position),
+                            _distance(units[1].position, target.position),
+                        ),
+                        _distance(units[0].position, units[1].position),
+                        _uuid_sort_key(units[0]),
+                        _uuid_sort_key(units[1]),
+                    ),
+                )
+                for ranger in pair:
+                    available_rangers.remove(ranger)
+                    selected_rangers.add(ranger.id)
+                continue
+            if len(available_vanguards) >= 2:
+                pair = min(
+                    combinations(available_vanguards, 2),
+                    key=lambda units: (
+                        max(
+                            _distance(units[0].position, target.position),
+                            _distance(units[1].position, target.position),
+                        ),
+                        _distance(units[0].position, units[1].position),
+                        _uuid_sort_key(units[0]),
+                        _uuid_sort_key(units[1]),
+                    ),
+                )
+                for vanguard in pair:
+                    available_vanguards.remove(vanguard)
+                    selected_vanguards.add(vanguard.id)
+                continue
+            break
+        return selected_vanguards, selected_rangers
+
+    def _refresh_core_raid_launch(
+        self,
+        turn: Turn,
+        target: object | None,
+    ) -> bool:
+        if not isinstance(target, CoreRaidTarget) or self.core_raid_launched:
+            return True
+        if (
+            len(turn.vanguards) < MAIN_ASSAULT_MIN_VANGUARDS
+            or len(turn.rangers) < MAIN_ASSAULT_MIN_RANGERS
+            or self.core_raid_rally_position is None
+        ):
+            self.core_raid_launched = True
+            return True
+
+        strike_vanguards, strike_rangers = self._strike_group_ids(turn, target)
+        rallied_vanguards = sum(
+            vanguard.id in strike_vanguards
+            and _distance(vanguard.position, self.core_raid_rally_position)
+            <= MAIN_ASSAULT_RALLY_RADIUS
+            for vanguard in turn.vanguards
         )
+        rallied_rangers = sum(
+            ranger.id in strike_rangers
+            and _distance(ranger.position, self.core_raid_rally_position)
+            <= MAIN_ASSAULT_RALLY_RADIUS
+            for ranger in turn.rangers
+        )
+        self.core_raid_launched = (
+            rallied_vanguards
+            >= MAIN_ASSAULT_MIN_VANGUARDS - VANGUARD_CORE_GUARDS
+            and rallied_rangers
+            >= MAIN_ASSAULT_MIN_RANGERS - RANGER_CORE_GUARDS
+        )
+        return self.core_raid_launched
 
     def _refresh_return_states(self, turn: Turn) -> None:
         core = turn.core
@@ -3377,16 +3674,38 @@ class CoreFarmer:
             ):
                 self.scout_cooldown_until.pop(worker_id, None)
 
-    def _recall_strike_group(self, turn: Turn, target: object | None) -> None:
-        strike_vanguards, strike_rangers = self._strike_group_ids(turn, target)
-        self.squad_return_ids.update(strike_vanguards)
-        self.squad_return_ids.update(strike_rangers)
+    def _core_defense_active(self, nearest_threat: int | None) -> bool:
+        return bool(
+            self.threat_assessment.breakout
+            or self.threat_assessment.recent_core_attack
+            or (
+                nearest_threat is not None
+                and nearest_threat <= CORE_EVADE_TRIGGER_DISTANCE
+            )
+        )
+
+    def _recall_core_defenders(self, turn: Turn, threat_count: int) -> None:
+        core = turn.core
+        if core is None:
+            return
+        guard_vanguards, guard_rangers = _core_guard_ids(turn)
+        for units, guard_ids in (
+            (turn.vanguards, guard_vanguards),
+            (turn.rangers, guard_rangers),
+        ):
+            recall_count = min(len(units), len(guard_ids) + threat_count)
+            self.squad_return_ids.update(
+                unit.id
+                for unit in sorted(
+                    units,
+                    key=lambda unit: (
+                        _distance(unit.position, core.position),
+                        _uuid_sort_key(unit),
+                    ),
+                )[:recall_count]
+            )
         if self.core_raid_spotter_id is not None:
             self.scout_return_ids.add(self.core_raid_spotter_id)
-        self.squad_disengage_until_tick = max(
-            self.squad_disengage_until_tick,
-            turn.tick + SQUAD_DISENGAGE_TICKS,
-        )
 
     def _active_raid_target_for_recall(self) -> CoreRaidTarget | None:
         target_id = self.isolated_core_target_id
@@ -3490,6 +3809,9 @@ class CoreFarmer:
         enemies: Sequence[object],
         context: MovementContext,
         isolated_core_target: object | None,
+        *,
+        raid_launched: bool,
+        reserve_core_for_spawn: bool,
     ) -> None:
         core = turn.core
         if core is None:
@@ -3508,6 +3830,7 @@ class CoreFarmer:
             enemies,
             context.obstacles,
         )
+        guard_vanguards, _ = _core_guard_ids(turn)
         strike_vanguards, _ = self._strike_group_ids(turn, isolated_core_target)
         for index, vanguard in enumerate(
             sorted(turn.vanguards, key=_uuid_sort_key)
@@ -3530,7 +3853,9 @@ class CoreFarmer:
                 if direction is not None:
                     vanguard.sweep(direction)
                     continue
-            if self._healing_return_ready(turn, vanguard):
+            if self._healing_return_ready(turn, vanguard) and (
+                not reserve_core_for_spawn or vanguard.position == core.position
+            ):
                 if vanguard.position == core.position:
                     vanguard.heal()
                 elif not _queue_toward(
@@ -3557,20 +3882,116 @@ class CoreFarmer:
                 if direction is not None:
                     vanguard.sweep(direction)
                     continue
-            strike_member = vanguard.id in strike_vanguards
+            adjacent_enemies = [
+                enemy
+                for enemy in enemies
+                if _distance(vanguard.position, enemy.position) == 1
+            ]
+            return_adjacent = list(adjacent_enemies)
+            if (
+                visible_target is not None
+                and getattr(visible_target, "kind", None) == "CORE"
+                and _distance(vanguard.position, visible_target.position) == 1
+            ):
+                return_adjacent.append(visible_target)
+            if (
+                vanguard.id in self.squad_return_ids
+                and vanguard.id in strike_vanguards
+                and return_adjacent
+            ):
+                target = min(
+                    return_adjacent,
+                    key=lambda enemy: _combat_target_key(
+                        vanguard.position,
+                        enemy,
+                    ),
+                )
+                direction = _direction_to_adjacent(
+                    vanguard.position,
+                    target.position,
+                )
+                if direction is not None:
+                    vanguard.sweep(direction)
+                    continue
+            if (
+                vanguard.id in self.squad_return_ids
+                and _distance(vanguard.position, core.position)
+                > VANGUARD_GUARD_RADIUS
+            ):
+                if not _queue_toward(
+                    vanguard,
+                    core.position,
+                    context,
+                    avoid_danger=False,
+                    target_radius=VANGUARD_GUARD_RADIUS,
+                ):
+                    vanguard.wait()
+                continue
+            strike_member = (
+                vanguard.id in strike_vanguards
+                and vanguard.id not in self.squad_return_ids
+            )
             if strike_member:
+                assault_position = (
+                    isolated_core_target.position
+                    if raid_launched or self.core_raid_rally_position is None
+                    else self.core_raid_rally_position
+                )
                 direction = _direction_to_adjacent(
                     vanguard.position,
                     isolated_core_target.position,
                 )
                 if direction is not None and visible_target is not None:
                     vanguard.sweep(direction)
-                elif not _queue_toward(
+                    continue
+                elif adjacent_enemies:
+                    target = min(
+                        adjacent_enemies,
+                        key=lambda enemy: _combat_target_key(
+                            vanguard.position,
+                            enemy,
+                        ),
+                    )
+                    direction = _direction_to_adjacent(
+                        vanguard.position,
+                        target.position,
+                    )
+                    if direction is not None:
+                        vanguard.sweep(direction)
+                        continue
+                if not _queue_toward(
                     vanguard,
-                    isolated_core_target.position,
+                    assault_position,
                     context,
+                    avoid_danger=(
+                        isinstance(isolated_core_target, CoreRaidTarget)
+                        and not raid_launched
+                    ),
+                    target_radius=(
+                        MAIN_ASSAULT_RALLY_RADIUS if not raid_launched else 0
+                    ),
                 ):
                     vanguard.wait()
+                continue
+            if vanguard.id == self.beacon_runner_id:
+                if turn.beacon.carrier_id == vanguard.id:
+                    if (
+                        _distance(vanguard.position, core.position)
+                        > BEACON_RETURN_RADIUS
+                        and _queue_toward(vanguard, core.position, context)
+                    ):
+                        continue
+                    vanguard.wait()
+                    continue
+                if (
+                    vanguard.position == turn.beacon.position
+                    and turn.beacon.status is BeaconStatus.GROUND
+                ):
+                    vanguard.pickup_beacon()
+                    continue
+                if _queue_toward(vanguard, turn.beacon.position, context):
+                    continue
+                vanguard.wait()
                 continue
             nearby_enemies = [
                 enemy
@@ -3638,6 +4059,16 @@ class CoreFarmer:
                 vanguard.wait()
                 continue
 
+            if (
+                vanguard.id not in guard_vanguards
+                and _queue_toward(
+                    vanguard,
+                    self._combat_patrol_target(turn, vanguard, index),
+                    context,
+                )
+            ):
+                continue
+
             target_position = _guard_post(
                 vanguard,
                 core.position,
@@ -3669,6 +4100,9 @@ class CoreFarmer:
         enemies: Sequence[object],
         context: MovementContext,
         isolated_core_target: object | None,
+        *,
+        raid_launched: bool,
+        reserve_core_for_spawn: bool,
     ) -> None:
         core = turn.core
         if core is None:
@@ -3688,6 +4122,7 @@ class CoreFarmer:
             enemies,
             context.obstacles,
         )
+        _, guard_rangers = _core_guard_ids(turn)
         _, strike_rangers = self._strike_group_ids(turn, isolated_core_target)
         for index, ranger in enumerate(
             sorted(turn.rangers, key=_uuid_sort_key)
@@ -3710,9 +4145,11 @@ class CoreFarmer:
                     immediate_core_threats,
                     key=lambda enemy: _combat_target_key(ranger.position, enemy),
                 )
-                ranger.shoot_cell(target.position)
+                ranger.shoot(target)
                 continue
-            if self._healing_return_ready(turn, ranger):
+            if self._healing_return_ready(turn, ranger) and (
+                not reserve_core_for_spawn or ranger.position == core.position
+            ):
                 if ranger.position == core.position:
                     ranger.heal()
                 elif not _queue_toward(
@@ -3739,9 +4176,59 @@ class CoreFarmer:
                     pursuing_targets,
                     key=lambda enemy: _combat_target_key(ranger.position, enemy),
                 )
-                ranger.shoot_cell(pursuer.position)
+                ranger.shoot(pursuer)
                 continue
-            strike_member = ranger.id in strike_rangers
+            return_shootable = [
+                enemy
+                for enemy in enemies
+                if _ranger_can_shoot(
+                    ranger.position,
+                    enemy.position,
+                    context.obstacles,
+                )
+            ]
+            if (
+                visible_target is not None
+                and getattr(visible_target, "kind", None) == "CORE"
+                and _ranger_can_shoot(
+                    ranger.position,
+                    visible_target.position,
+                    context.obstacles,
+                )
+            ):
+                return_shootable.append(visible_target)
+            if (
+                ranger.id in self.squad_return_ids
+                and ranger.id in strike_rangers
+                and return_shootable
+            ):
+                target = min(
+                    return_shootable,
+                    key=lambda enemy: _combat_target_key(
+                        ranger.position,
+                        enemy,
+                    ),
+                )
+                ranger.shoot(target)
+                continue
+            if (
+                ranger.id in self.squad_return_ids
+                and _distance(ranger.position, core.position)
+                > RANGER_GUARD_RADIUS
+            ):
+                if not _queue_toward(
+                    ranger,
+                    core.position,
+                    context,
+                    avoid_danger=False,
+                    target_radius=RANGER_GUARD_RADIUS,
+                ):
+                    ranger.wait()
+                continue
+            strike_member = (
+                ranger.id in strike_rangers
+                and ranger.id not in self.squad_return_ids
+            )
             if strike_member:
                 can_shoot_target_cell = _ranger_can_shoot(
                     ranger.position,
@@ -3750,15 +4237,38 @@ class CoreFarmer:
                 )
                 if visible_target is not None and can_shoot_target_cell:
                     ranger.shoot(visible_target)
-                elif (
-                    isinstance(isolated_core_target, CoreRaidTarget)
-                    and can_shoot_target_cell
-                ):
-                    ranger.shoot_cell(isolated_core_target.position)
+                elif (escort_targets := [
+                    enemy
+                    for enemy in avoidance_enemies
+                    if _ranger_can_shoot(
+                        ranger.position,
+                        enemy.position,
+                        context.obstacles,
+                    )
+                ]):
+                    escort = min(
+                        escort_targets,
+                        key=lambda enemy: _combat_target_key(
+                            ranger.position,
+                            enemy,
+                        ),
+                    )
+                    ranger.shoot(escort)
                 elif not _queue_toward(
                     ranger,
-                    isolated_core_target.position,
+                    (
+                        isolated_core_target.position
+                        if raid_launched or self.core_raid_rally_position is None
+                        else self.core_raid_rally_position
+                    ),
                     context,
+                    avoid_danger=(
+                        isinstance(isolated_core_target, CoreRaidTarget)
+                        and not raid_launched
+                    ),
+                    target_radius=(
+                        MAIN_ASSAULT_RALLY_RADIUS if not raid_launched else 0
+                    ),
                 ):
                     ranger.wait()
                 continue
@@ -3782,7 +4292,7 @@ class CoreFarmer:
                     shootable,
                     key=lambda enemy: _combat_target_key(ranger.position, enemy),
                 )
-                ranger.shoot_cell(target.position)
+                ranger.shoot(target)
                 continue
             if self.combat_pressure_active:
                 target_position = _guard_post(
@@ -3821,11 +4331,21 @@ class CoreFarmer:
                     shootable,
                     key=lambda enemy: _combat_target_key(ranger.position, enemy),
                 )
-                ranger.shoot_cell(target.position)
+                ranger.shoot(target)
                 continue
 
             if nearby_enemies:
                 ranger.wait()
+                continue
+
+            if (
+                ranger.id not in guard_rangers
+                and _queue_toward(
+                    ranger,
+                    self._combat_patrol_target(turn, ranger, index),
+                    context,
+                )
+            ):
                 continue
 
             target_position = _guard_post(
@@ -4026,6 +4546,129 @@ class CoreFarmer:
             self.last_core_cancel_reason = "BEACON_APPROACH"
         return cancel_for_beacon
 
+    def _spawn_unit_type(
+        self,
+        turn: Turn,
+        nearest_threat: int | None,
+    ) -> UnitType | None:
+        core = turn.core
+        if (
+            core is None
+            or core.view.state is not CoreState.NORMAL
+            or self.compatibility_hold
+        ):
+            return None
+        population = len(turn.units)
+        target_population = (
+            self.worker_target
+            + DEFENSE_VANGUARD_TARGET
+            + DEFENSE_RANGER_TARGET
+        )
+        if population >= target_population:
+            return None
+
+        next_unit = _next_force_unit_type(
+            self.worker_target,
+            len(turn.workers),
+            len(turn.vanguards),
+            len(turn.rangers),
+        )
+        if next_unit is None:
+            return None
+
+        emergency_spawn = self._core_defense_active(nearest_threat)
+        if emergency_spawn:
+            guard_vanguards, guard_rangers = _core_guard_ids(turn)
+            local_vanguards = sum(
+                _distance(unit.position, core.position) <= VANGUARD_GUARD_RADIUS
+                for unit in turn.vanguards
+            )
+            local_rangers = sum(
+                _distance(unit.position, core.position) <= RANGER_GUARD_RADIUS
+                for unit in turn.rangers
+            )
+            vanguard_deficit = max(0, len(guard_vanguards) - local_vanguards)
+            ranger_deficit = max(0, len(guard_rangers) - local_rangers)
+            next_unit = (
+                UnitType.VANGUARD
+                if nearest_threat is not None and nearest_threat <= 3
+                else UnitType.RANGER
+                if nearest_threat is not None and nearest_threat <= 6
+                else UnitType.RANGER
+                if ranger_deficit > vanguard_deficit
+                else UnitType.VANGUARD
+            )
+        elif (
+            nearest_threat is not None
+            and nearest_threat <= 3
+            and len(turn.vanguards) < EARLY_DEFENSE_VANGUARD_TARGET
+        ):
+            next_unit = UnitType.VANGUARD
+        elif (
+            nearest_threat is not None
+            and nearest_threat <= 6
+            and len(turn.rangers) < EARLY_DEFENSE_RANGER_TARGET
+        ):
+            next_unit = UnitType.RANGER
+
+        reserve = (
+            0
+            if emergency_spawn
+            or (
+                self.recovery_mode
+                and next_unit is UnitType.WORKER
+                and len(turn.workers)
+                < min(RECOVERY_MIN_WORKERS, self.worker_target)
+            )
+            else CORE_RESOURCE_RESERVE
+        )
+        threshold = min(
+            turn.resource_capacity,
+            reserve + unit_cost(next_unit, population),
+        )
+        return next_unit if turn.resources >= threshold else None
+
+    def _spawn_reservation(
+        self,
+        turn: Turn,
+        target: object | None,
+        retreat_enemies: Sequence[object],
+    ) -> UnitType | None:
+        core = turn.core
+        if core is None:
+            return None
+        nearest_threat = min(
+            (_distance(core.position, enemy.position) for enemy in retreat_enemies),
+            default=None,
+        )
+        next_unit = self._spawn_unit_type(turn, nearest_threat)
+        emergency_spawn = self._core_defense_active(nearest_threat)
+        if (
+            next_unit is None
+            or core.hp < 5
+            or core.shield < 5
+            or self.healing_defender_ids
+            or (
+                self.beacon_policy == "pursue"
+                and self._beacon_campaign_ready(turn, target)
+                and core.position == turn.beacon.position
+                and turn.beacon.status is BeaconStatus.GROUND
+            )
+            or (
+                retreat_enemies
+                and nearest_threat is not None
+                and not emergency_spawn
+                and (
+                    nearest_threat <= CORE_EVADE_TRIGGER_DISTANCE
+                    or self.preemptive_evade_enemy_ids
+                    or self.pursuing_enemy_ids
+                    or turn.tick <= self.recent_core_attack_until_tick
+                )
+            )
+        ):
+            return None
+        return next_unit
+
     def _control_core(
         self,
         turn: Turn,
@@ -4088,22 +4731,14 @@ class CoreFarmer:
             not self.compatibility_hold
             and
             self.beacon_policy == "pursue"
+            and self._beacon_campaign_ready(turn, isolated_core_target)
             and core.position == turn.beacon.position
             and turn.beacon.status is BeaconStatus.GROUND
         ):
             core.pickup_beacon()
             return
 
-        population = len(turn.units)
-        worker_cost = unit_cost(UnitType.WORKER, population)
-        vanguard_cost = unit_cost(UnitType.VANGUARD, population)
-        ranger_cost = unit_cost(UnitType.RANGER, population)
-        can_spawn = (
-            not self.compatibility_hold
-            and
-            context.friendly_counts[core.position] < 2
-            and population < TARGET_POPULATION
-        )
+        can_spawn = context.friendly_counts[core.position] < 2
         nearest_threat = min(
             (
                 _distance(core.position, enemy.position)
@@ -4125,6 +4760,17 @@ class CoreFarmer:
             )
         ):
             core.heal()
+            return
+
+        next_unit = self._spawn_unit_type(turn, nearest_threat)
+        if (
+            can_spawn
+            and core.hp == 5
+            and core.shield >= 5
+            and self._core_defense_active(nearest_threat)
+            and next_unit in {UnitType.VANGUARD, UnitType.RANGER}
+        ):
+            core.spawn(next_unit)
             return
 
         if (
@@ -4157,187 +4803,17 @@ class CoreFarmer:
             core.wait()
             return
 
-        if isolated_core_target is not None:
-            core.wait()
+        if can_spawn and next_unit is not None:
+            core.spawn(next_unit)
             return
-
-        if (
-            not enemies
-            and not self.recovery_mode
-            and turn.tick <= self.threat_caution_until_tick
-        ):
-            core.wait()
-            return
-
-        # Production is a last resort when a fully shielded Core cannot open a
-        # safe escape route. Newly spawned Units cannot act in their creation Tick.
-        if can_spawn:
-            if (
-                nearest_threat is not None
-                and nearest_threat <= 3
-                and len(turn.vanguards) < DEFENSE_VANGUARD_TARGET
-                and turn.resources >= vanguard_cost
-            ):
-                core.spawn(UnitType.VANGUARD)
-                return
-            if (
-                nearest_threat is not None
-                and nearest_threat <= 6
-                and len(turn.workers) >= 4
-                and len(turn.rangers) < DEFENSE_RANGER_TARGET
-                and turn.resources >= ranger_cost
-            ):
-                core.spawn(UnitType.RANGER)
-                return
-
-        if self.combat_pressure_active:
-            core.wait()
-            return
-
-        if can_spawn:
-            early_worker_goal = min(
-                EARLY_DEFENSE_WORKER_GOAL,
-                self.worker_target,
-            )
-            early_defense_is_safe = (
-                len(turn.workers) >= early_worker_goal
-                and nearest_threat is None
-            )
-            if (
-                early_defense_is_safe
-                and len(turn.vanguards) < EARLY_DEFENSE_VANGUARD_TARGET
-                and turn.resources
-                >= EARLY_DEFENSE_RESERVE + vanguard_cost
-            ):
-                core.spawn(UnitType.VANGUARD)
-                return
-            if (
-                early_defense_is_safe
-                and len(turn.vanguards) >= EARLY_DEFENSE_VANGUARD_TARGET
-                and len(turn.rangers) < EARLY_DEFENSE_RANGER_TARGET
-                and turn.resources >= EARLY_DEFENSE_RESERVE + ranger_cost
-            ):
-                core.spawn(UnitType.RANGER)
-                return
-
-            if (
-                self.recovery_mode
-                and len(turn.workers)
-                < min(RECOVERY_MIN_WORKERS, self.worker_target)
-            ):
-                expansion_threshold = worker_cost
-            else:
-                expansion_threshold = _worker_expansion_threshold(
-                    len(turn.workers),
-                    self.worker_target,
-                    turn.resource_capacity,
-                    population,
-                )
-            economic_expansion_is_safe = (
-                nearest_threat is None or nearest_threat > 6
-            )
-            mature_worker_goal = min(
-                MATURE_DEFENSE_WORKER_GOAL,
-                self.worker_target,
-            )
-            full_defense_ready = (
-                len(turn.workers) >= mature_worker_goal
-                and len(turn.vanguards) >= DEFENSE_VANGUARD_TARGET
-                and len(turn.rangers) >= DEFENSE_RANGER_TARGET
-            )
-            if (
-                len(turn.workers) < self.worker_target
-                and (
-                    len(turn.workers) < mature_worker_goal
-                    or full_defense_ready
-                )
-                and turn.resources >= expansion_threshold
-                and economic_expansion_is_safe
-            ):
-                core.spawn(UnitType.WORKER)
-                return
-
-            mature_for_defense = (
-                len(turn.workers) >= mature_worker_goal
-                and nearest_threat is None
-                and turn.resources >= LONG_TERM_DEFENSE_RESERVE
-            )
-            if mature_for_defense and len(turn.vanguards) < DEFENSE_VANGUARD_TARGET:
-                if turn.resources >= LONG_TERM_DEFENSE_RESERVE + vanguard_cost:
-                    core.spawn(UnitType.VANGUARD)
-                    return
-            if (
-                mature_for_defense
-                and len(turn.vanguards) >= DEFENSE_VANGUARD_TARGET
-                and len(turn.rangers) < DEFENSE_RANGER_TARGET
-            ):
-                if turn.resources >= LONG_TERM_DEFENSE_RESERVE + ranger_cost:
-                    core.spawn(UnitType.RANGER)
-                    return
 
         if cargo_waiting:
             core.wait()
             return
 
-        if self.recovery_mode:
-            # Rebuild locally instead of advertising the Core on the public
-            # Beacon route.
-            core.wait()
-            return
-
-        if self.beacon_policy == "hold":
-            core.wait()
-            return
-
-        if self.beacon_policy == "retreat":
-            early_worker_goal = min(
-                EARLY_DEFENSE_WORKER_GOAL,
-                self.worker_target,
-            )
-            early_fleet_ready = (
-                len(turn.workers) >= early_worker_goal
-                and len(turn.vanguards) >= EARLY_DEFENSE_VANGUARD_TARGET
-                and len(turn.rangers) >= EARLY_DEFENSE_RANGER_TARGET
-            )
-            service_window_complete = (
-                turn.tick
-                - max(
-                    self.last_core_move_tick,
-                    self.startup_tick
-                    if self.startup_tick is not None
-                    else self.last_core_move_tick,
-                )
-                >= RETREAT_SERVICE_TICKS
-            )
-            needs_more_beacon_distance = (
-                _distance(core.position, turn.beacon.position)
-                < RETREAT_MIN_BEACON_DISTANCE
-            )
-            if (
-                early_fleet_ready
-                and service_window_complete
-                and needs_more_beacon_distance
-                and self._start_core_retreat(
-                    turn,
-                    context,
-                    enemies,
-                    reason="RETREAT",
-                )
-            ):
-                return
-            core.wait()
-            return
-
-        if core.position == turn.beacon.position:
-            return
-
-        directions = _path_directions(
-            core.position,
-            turn.beacon.position,
-            self._core_blocked_cells(turn, context),
-        )
-        if directions:
-            core.start_move(directions[0])
+        # Expansion and Beacon pressure are handled by Units. The Core moves
+        # only when the survival controller starts an EVADE migration.
+        return
 
 
 def _event_int(event: object, name: str) -> int:
@@ -4769,6 +5245,7 @@ def play(
     beacon_policy: str,
     compatibility_marker: Path | None = DEFAULT_COMPATIBILITY_MARKER,
     heartbeat_file: Path | None = None,
+    history_db: Path | None = None,
     stale_turn_timeout_seconds: float = DEFAULT_STALE_TURN_TIMEOUT_SECONDS,
 ) -> None:
     if (
@@ -4783,7 +5260,15 @@ def play(
     )
     last_accepted_tick: int | None = None
     resource_ledger_snapshot: ResourceLedgerSnapshot | None = None
-    with ArenaHeroClient(api_key=api_key, base_url=base_url) as game:
+    with ExitStack() as stack:
+        history = (
+            stack.enter_context(HistoryRecorder(history_db))
+            if history_db is not None
+            else None
+        )
+        game = stack.enter_context(
+            ArenaHeroClient(api_key=api_key, base_url=base_url)
+        )
         watchdog = _AcceptedTurnWatchdog(game, stale_turn_timeout_seconds)
         with watchdog:
             for event in game.events():
@@ -4820,6 +5305,39 @@ def play(
                 last_accepted_tick = accepted.tick
                 watchdog.mark_accepted()
                 resource_ledger_snapshot = _resource_ledger_snapshot(turn)
+                if history is not None:
+                    try:
+                        history.record(
+                            turn,
+                            strategy={
+                                "phase": tactic.strategy_phase(turn),
+                                "posture": tactic.threat_assessment.global_posture.value,
+                                "threat": tactic.threat_assessment.level.value,
+                                "threat_reason": tactic.threat_assessment.primary_reason,
+                                "core_target": (
+                                    str(tactic.isolated_core_target_id)
+                                    if tactic.isolated_core_target_id
+                                    else None
+                                ),
+                                "unit_target": (
+                                    str(tactic.stationary_unit_target_id)
+                                    if tactic.stationary_unit_target_id
+                                    else None
+                                ),
+                                "beacon_runner": (
+                                    str(tactic.beacon_runner_id)
+                                    if tactic.beacon_runner_id
+                                    else None
+                                ),
+                            },
+                        )
+                    except (OSError, sqlite3.Error) as exc:
+                        print(
+                            f"WARNING history_disabled error={type(exc).__name__}: {exc}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        history = None
                 _notify_systemd(
                     "WATCHDOG=1",
                     _systemd_status(turn, tactic, accepted.tick),
@@ -4857,7 +5375,7 @@ def play(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Resource-first Arena Hero tactic.")
+    parser = argparse.ArgumentParser(description="Aggressive Arena Hero expansion tactic.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--worker-target", type=int, default=DEFAULT_WORKER_TARGET)
@@ -4886,6 +5404,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Atomically write liveness metadata after every accepted Turn.",
     )
     parser.add_argument(
+        "--history-db",
+        type=Path,
+        default=Path("arena_history.sqlite3"),
+        help="Record bounded Turn history for arena-hero-dashboard.",
+    )
+    parser.add_argument(
         "--stale-turn-timeout-seconds",
         type=float,
         default=DEFAULT_STALE_TURN_TIMEOUT_SECONDS,
@@ -4909,6 +5433,7 @@ def main(argv: list[str] | None = None) -> int:
             beacon_policy=args.beacon_policy,
             compatibility_marker=args.compatibility_marker,
             heartbeat_file=args.heartbeat_file,
+            history_db=args.history_db,
             stale_turn_timeout_seconds=args.stale_turn_timeout_seconds,
         )
 

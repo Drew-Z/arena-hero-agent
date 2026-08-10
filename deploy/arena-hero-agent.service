@@ -1,5 +1,5 @@
 [Unit]
-Description=Arena Hero resource collection agent
+Description=Arena Hero aggressive expansion agent
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=0
@@ -11,14 +11,16 @@ Group=arena-hero
 WorkingDirectory=/opt/arena-hero-agent/current
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
-Environment=ARENA_WORKER_TARGET=12
-Environment=ARENA_BEACON_POLICY=retreat
+Environment=ARENA_WORKER_TARGET=18
+Environment=ARENA_BEACON_POLICY=pursue
 Environment=ARENA_TUNING_GENERATION=0
 EnvironmentFile=/etc/arena-hero-agent.env
 EnvironmentFile=-/etc/arena-hero-agent/runtime.env
 RuntimeDirectory=arena-hero-agent
 RuntimeDirectoryMode=0750
-ExecStart=/opt/arena-hero-agent/current/.venv/bin/arena-hero-agent --env-file /etc/arena-hero-agent.env --worker-target ${ARENA_WORKER_TARGET} --beacon-policy ${ARENA_BEACON_POLICY} --heartbeat-file /run/arena-hero-agent/heartbeat.json --stale-turn-timeout-seconds 90
+StateDirectory=arena-hero-agent
+StateDirectoryMode=0750
+ExecStart=/opt/arena-hero-agent/current/.venv/bin/arena-hero-agent --env-file /etc/arena-hero-agent.env --worker-target ${ARENA_WORKER_TARGET} --beacon-policy ${ARENA_BEACON_POLICY} --history-db /var/lib/arena-hero-agent/history.sqlite3 --heartbeat-file /run/arena-hero-agent/heartbeat.json --stale-turn-timeout-seconds 90
 Restart=on-failure
 RestartPreventExitStatus=2 10 11 12 13 14 130
 RestartForceExitStatus=75

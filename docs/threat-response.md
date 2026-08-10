@@ -12,10 +12,11 @@ it does not call a language model or rewrite itself while the game is live.
 4. A hostile position from an old Turn is memory, not current truth.
 5. Movement and attack are mutually exclusive Unit actions. An enemy cannot move
    and attack in the same Tick.
-6. Normal production stops at 30 Units: 23 Workers, 3 Vanguards, and 4 Rangers.
+6. Normal production stops at 48 Units: 18 Workers, 14 Vanguards, and 16 Rangers.
    Dynamic-price expansion is staged and never exceeds this tested cap.
-7. No raid continues through local combat pressure merely because the original
-   target still exists.
+7. A visible hostile Core remains the primary mission target. Local pressure
+   changes guard and movement assignments, but does not erase the target unless
+   the Core itself enters a survival-critical state.
 
 ## Hierarchical Controller
 
@@ -110,20 +111,21 @@ shot or sweep. Otherwise it takes the lowest-risk move or explicitly waits.
 
 ## Detached Squad Response
 
-Core raids and stationary-clearance missions are subordinate to local survival.
-If a non-target Vanguard or Ranger comes within the strike group's local
-five-cell response radius:
+Core raids and stationary-clearance missions remain active during ordinary
+local pressure. If a non-target Vanguard or Ranger comes within the strike
+group's local five-cell response radius:
 
-1. release the old target and observer assignment;
-2. mark the strike members for return;
-3. allow an immediately legal counterattack;
-4. recall survivors toward Core guard posts for at least eight Ticks;
-5. keep the Core stationary unless the enemy also satisfies a Core-specific
+1. keep the Core target and observer assignment when the hostile Core is still
+   visible;
+2. allow an immediately legal counterattack against the interceptor;
+3. keep at least one Vanguard and one Ranger as Core guards;
+4. move the contacted squad member toward the mission or a safer adjacent cell;
+5. migrate the Core only when the enemy also satisfies a Core-specific
    pre-evade or attack condition.
 
 This separates "the squad is being intercepted" from "the Core is being
-chased." A remote skirmish pauses expansion and cancels offensive work, but it
-does not drag the slow Core across the map.
+chased." A remote skirmish changes local assignments, but it does not erase a
+visible Core target or drag the slow Core across the map.
 
 ## Scout And Observer Response
 
@@ -154,10 +156,11 @@ Fight when all of the following are true:
 Withdraw when any of the following is true:
 
 - the Core reaches `PRE_EVADE`, `ENGAGED`, or `BREAKOUT`;
-- a detached squad is intercepted by a non-target combat Unit;
+- the local Core enters a survival-critical state or the target leaves the
+  configured visibility memory window;
 - a Scout or observer is exposed inside the local response radius;
-- an offensive Core becomes protected, moves, contradicts memory, or exceeds the
-  bounded mission distance;
+- an offensive Core contradicts current state or the only available combat
+  would turn defense into an unbounded chase;
 - the only available combat would turn defense into an unbounded chase.
 
 Rangers use target-free cell fire for a legal current cell. A shot at a moving

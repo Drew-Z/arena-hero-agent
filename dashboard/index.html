@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Arena Hero 战术地图</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Arena Hero 战术地图</div>
+    <div class="metrics" aria-live="polite">
+      <span>Tick <strong id="metric-tick">--</strong></span>
+      <span>资源 <strong id="metric-resources">--/--</strong></span>
+      <span>人口 <strong id="metric-population">--</strong></span>
+      <span>兵力 <strong id="metric-force">--</strong></span>
+      <span>态势 <strong id="metric-posture">--</strong></span>
+      <span>敌情 <strong id="metric-enemies">--</strong></span>
+    </div>
+    <nav class="controls" aria-label="历史回放控制">
+      <button id="previous-tick" class="icon-button" title="上一个 Tick" aria-label="上一个 Tick">‹</button>
+      <button id="toggle-play" class="icon-button" title="播放历史" aria-label="播放历史">▶</button>
+      <input id="tick-slider" type="range" min="0" max="0" value="0" aria-label="选择 Tick">
+      <button id="live-tick" class="mode-button active" title="返回实时">实时</button>
+      <button id="next-tick" class="icon-button" title="下一个 Tick" aria-label="下一个 Tick">›</button>
+      <button id="zoom-out" class="icon-button" title="缩小" aria-label="缩小">−</button>
+      <button id="zoom-in" class="icon-button" title="放大" aria-label="放大">+</button>
+      <button id="center-map" class="icon-button" title="定位己方 Core" aria-label="定位己方 Core">⌖</button>
+    </nav>
+  </header>
+
+  <main class="workspace">
+    <section class="map-region" aria-label="战术地图">
+      <canvas id="map" tabindex="0"></canvas>
+      <div class="legend" aria-label="地图图例">
+        <span><i class="swatch explored"></i>已探索</span>
+        <span><i class="swatch obstacle"></i>障碍</span>
+        <span><i class="swatch resource"></i>当前资源</span>
+        <span><i class="swatch resource-history"></i>历史资源</span>
+        <span><i class="swatch friendly"></i>己方</span>
+        <span><i class="swatch enemy"></i>敌方</span>
+        <span><i class="swatch old-core"></i>历史 Core</span>
+        <span><i class="swatch beacon"></i>冠军信标</span>
+      </div>
+      <div id="map-status" class="map-status">等待历史数据</div>
+    </section>
+
+    <aside class="intel-panel">
+      <div class="panel-tabs" role="tablist" aria-label="情报视图">
+        <button id="events-tab" class="panel-tab active" role="tab" aria-selected="true">事件</button>
+        <button id="ranking-tab" class="panel-tab" role="tab" aria-selected="false">排行榜</button>
+      </div>
+      <section id="events-panel" class="panel-view" role="tabpanel">
+        <ol id="event-list" class="event-list"></ol>
+      </section>
+      <section id="ranking-panel" class="panel-view hidden" role="tabpanel">
+        <div class="ranking-modes" role="tablist" aria-label="排行榜类型">
+          <button data-ranking="damage_dealt" class="ranking-mode active">伤害</button>
+          <button data-ranking="core_destruction_participations" class="ranking-mode">Core</button>
+          <button data-ranking="beacon_ticks_held" class="ranking-mode">信标</button>
+        </div>
+        <ol id="ranking-list" class="ranking-list"></ol>
+      </section>
+    </aside>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>

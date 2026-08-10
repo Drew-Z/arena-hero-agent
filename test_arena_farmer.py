@@ -29,9 +29,11 @@ from arena_farmer import (
     ResourceLedgerSnapshot,
     ThreatLevel,
     _emit_resource_ledger,
+    _core_guard_ids,
     _enemy_threat_cells,
     _is_turn_scoped_api_error,
     _manual_override_summary,
+    _next_force_unit_type,
     _notify_systemd,
     _path_directions,
     _position_diagnostics,
@@ -64,8 +66,10 @@ VANGUARD_2 = "00000000-0000-4000-8000-000000000010"
 RANGER_2 = "00000000-0000-4000-8000-000000000011"
 VANGUARD_3 = "00000000-0000-4000-8000-000000000012"
 VANGUARD_4 = "00000000-0000-4000-8000-000000000015"
+VANGUARD_5 = "00000000-0000-4000-8000-000000000016"
 RANGER_3 = "00000000-0000-4000-8000-000000000013"
 RANGER_4 = "00000000-0000-4000-8000-000000000014"
+RANGER_5 = "00000000-0000-4000-8000-000000000017"
 ENEMY_1 = "10000000-0000-4000-8000-000000000001"
 ENEMY_2 = "10000000-0000-4000-8000-000000000002"
 
@@ -284,6 +288,79 @@ class DynamicPricingTests(unittest.TestCase):
 
 
 class CoreFarmerTests(unittest.TestCase):
+    def test_mature_core_guards_are_the_nearest_units(self) -> None:
+        turn = make_turn(
+            units=[
+                unit(VANGUARD_1, "VANGUARD", (40, 0)),
+                unit(VANGUARD_2, "VANGUARD", (41, 0)),
+                unit(VANGUARD_3, "VANGUARD", (0, 3)),
+                unit(VANGUARD_4, "VANGUARD", (0, -3)),
+                unit(VANGUARD_5, "VANGUARD", (42, 0)),
+                unit(RANGER_1, "RANGER", (-40, 0)),
+                unit(RANGER_2, "RANGER", (-41, 0)),
+                unit(RANGER_3, "RANGER", (2, 0)),
+                unit(RANGER_4, "RANGER", (-2, 0)),
+                unit(RANGER_5, "RANGER", (-42, 0)),
+            ]
+        )
+
+        vanguards, rangers = _core_guard_ids(turn)
+
+        self.assertEqual(vanguards, {UUID(VANGUARD_3), UUID(VANGUARD_4)})
+        self.assertEqual(rangers, {UUID(RANGER_3), UUID(RANGER_4)})
+
+    def test_core_threat_recalls_active_raid_units(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        defenders = [
+            unit(VANGUARD_1, "VANGUARD", (0, -3)),
+            unit(VANGUARD_2, "VANGUARD", (20, 0)),
+            unit(RANGER_1, "RANGER", (-2, 0)),
+            unit(RANGER_2, "RANGER", (21, 0)),
+        ]
+        for tick in (100, 101, 102):
+            tactic.choose_actions(
+                make_turn(
+                    tick=tick,
+                    units=defenders,
+                    enemies=[enemy_core(ENEMY_1, (30, 0))],
+                )
+            )
+        self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
+
+        threatened = make_turn(
+            tick=103,
+            units=defenders,
+            enemies=[
+                enemy_core(ENEMY_1, (30, 0)),
+                unit(ENEMY_2, "RANGER", (3, 0), controlled=False),
+            ],
+        )
+        tactic.choose_actions(threatened)
+        actions = threatened.plan.model_dump(mode="json", exclude_none=True)[
+            "unit_actions"
+        ]
+
+        self.assertEqual(actions[VANGUARD_2], {"type": "MOVE", "direction": "LEFT"})
+        self.assertEqual(actions[RANGER_2], {"type": "MOVE", "direction": "LEFT"})
+        self.assertIn(UUID(VANGUARD_2), tactic.squad_return_ids)
+        self.assertIn(UUID(RANGER_2), tactic.squad_return_ids)
+
+    def test_near_core_threat_spawns_combat_unit_before_retreat(self) -> None:
+        turn = make_turn(
+            tick=100,
+            resources=10,
+            units=[unit(WORKER_1, "WORKER", (5, 5), cargo=0)],
+            enemies=[unit(ENEMY_1, "RANGER", (3, 0), controlled=False)],
+        )
+
+        CoreFarmer(worker_target=6, beacon_policy="hold").choose_actions(turn)
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+
+        self.assertEqual(
+            queued["core_action"],
+            {"type": "SPAWN", "unit_type": "VANGUARD"},
+        )
+
     @staticmethod
     def _workers(count: int, *, cargo: int = 0) -> list[dict[str, object]]:
         identifiers = [
@@ -786,6 +863,20 @@ class CoreFarmerTests(unittest.TestCase):
         )
         self.assertIn(fallback, ((Direction.RIGHT,), (Direction.DOWN,)))
 
+    def test_pathfinder_approaches_open_rally_radius_when_center_is_blocked(
+        self,
+    ) -> None:
+        blocked = {(10, 0), (9, 0), (11, 0), (10, -1), (10, 1)}
+
+        directions = _path_directions(
+            (0, 0),
+            (10, 0),
+            blocked,
+            target_radius=5,
+        )
+
+        self.assertEqual(directions, (Direction.RIGHT,))
+
     def test_cargo_worker_routes_around_obstacle_and_deposits(self) -> None:
         tactic = CoreFarmer()
         position = (2, 0)
@@ -914,10 +1005,9 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertNotIn((2, 2), danger)
         self.assertNotIn((3, 3), danger)
 
-    def test_core_moves_toward_beacon_and_avoids_resource_cells(self) -> None:
+    def test_core_stays_stationary_during_beacon_campaign(self) -> None:
         direct = plan(make_turn(beacon_position=(3, 0)))
-        self.assertEqual(direct["core_action"]["type"], "START_MOVE")
-        self.assertEqual(direct["core_action"]["direction"], "RIGHT")
+        self.assertNotEqual(direct.get("core_action", {}).get("type"), "START_MOVE")
 
         detour = plan(
             make_turn(
@@ -925,10 +1015,9 @@ class CoreFarmerTests(unittest.TestCase):
                 resource_cells=[(1, 0)],
             )
         )
-        self.assertEqual(detour["core_action"]["type"], "START_MOVE")
-        self.assertNotEqual(detour["core_action"]["direction"], "RIGHT")
+        self.assertNotEqual(detour.get("core_action", {}).get("type"), "START_MOVE")
 
-    def test_retreat_policy_moves_core_away_from_beacon(self) -> None:
+    def test_retreat_policy_does_not_move_core_without_a_threat(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="retreat")
         tactic.startup_tick = 0
         turn = make_turn(
@@ -943,10 +1032,9 @@ class CoreFarmerTests(unittest.TestCase):
         tactic.choose_actions(turn)
         queued = turn.plan.model_dump(mode="json", exclude_none=True)
 
-        self.assertEqual(queued["core_action"]["type"], "START_MOVE")
-        self.assertEqual(queued["core_action"]["direction"], "LEFT")
+        self.assertNotEqual(queued.get("core_action", {}).get("type"), "START_MOVE")
 
-    def test_retreat_policy_avoids_resource_on_preferred_core_cell(self) -> None:
+    def test_retreat_policy_ignores_beacon_geometry_without_a_threat(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="retreat")
         tactic.startup_tick = 0
         turn = make_turn(
@@ -962,8 +1050,7 @@ class CoreFarmerTests(unittest.TestCase):
         tactic.choose_actions(turn)
         queued = turn.plan.model_dump(mode="json", exclude_none=True)
 
-        self.assertEqual(queued["core_action"]["type"], "START_MOVE")
-        self.assertNotEqual(queued["core_action"]["direction"], "LEFT")
+        self.assertNotEqual(queued.get("core_action", {}).get("type"), "START_MOVE")
 
     def test_retreat_policy_holds_at_beacon_distance_floor(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="retreat")
@@ -981,7 +1068,7 @@ class CoreFarmerTests(unittest.TestCase):
         tactic.choose_actions(turn)
         queued = turn.plan.model_dump(mode="json", exclude_none=True)
 
-        self.assertEqual(queued["core_action"]["type"], "WAIT")
+        self.assertNotEqual(queued.get("core_action", {}).get("type"), "START_MOVE")
 
     def test_retreat_policy_keeps_service_window_after_core_move(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="retreat")
@@ -999,7 +1086,7 @@ class CoreFarmerTests(unittest.TestCase):
         tactic.choose_actions(turn)
         queued = turn.plan.model_dump(mode="json", exclude_none=True)
 
-        self.assertEqual(queued["core_action"]["type"], "WAIT")
+        self.assertNotEqual(queued.get("core_action", {}).get("type"), "START_MOVE")
 
     def test_visible_enemy_makes_core_evade_before_noncritical_repair(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="retreat")
@@ -1059,7 +1146,7 @@ class CoreFarmerTests(unittest.TestCase):
             ),
             beacon_policy="hold",
         )
-        self.assertEqual(queued["core_action"]["type"], "WAIT")
+        self.assertNotEqual(queued.get("core_action", {}).get("type"), "START_MOVE")
 
     def test_compatibility_hold_keeps_harvest_and_deposit_running(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1092,7 +1179,7 @@ class CoreFarmerTests(unittest.TestCase):
         )
         self.assertEqual(queued["unit_actions"][WORKER_1]["type"], "HARVEST")
         self.assertEqual(queued["unit_actions"][WORKER_2]["type"], "DEPOSIT")
-        self.assertEqual(queued["core_action"]["type"], "WAIT")
+        self.assertNotEqual(queued.get("core_action", {}).get("type"), "START_MOVE")
 
     def test_compatibility_hold_stops_spawning_and_active_raids(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1215,7 +1302,7 @@ class CoreFarmerTests(unittest.TestCase):
             ),
             beacon_policy="hold",
         )
-        self.assertEqual(queued["core_action"]["type"], "WAIT")
+        self.assertNotEqual(queued.get("core_action", {}).get("type"), "START_MOVE")
 
     def test_evade_toward_beacon_continues_when_enemy_distance_improves(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="retreat")
@@ -1698,9 +1785,10 @@ class CoreFarmerTests(unittest.TestCase):
         tactic.choose_actions(turn)
         queued = turn.plan.model_dump(mode="json", exclude_none=True)
 
-        self.assertEqual(queued["core_action"]["type"], "START_MOVE")
+        self.assertNotEqual(queued.get("core_action", {}).get("type"), "PICKUP_BEACON")
+        self.assertNotEqual(queued.get("core_action", {}).get("type"), "START_MOVE")
 
-    def test_retreat_policy_keeps_startup_service_window(self) -> None:
+    def test_retreat_policy_never_starts_routine_beacon_migration(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="retreat")
         units = [
             unit(WORKER_1, "WORKER", (5, 5), cargo=0),
@@ -1709,15 +1797,19 @@ class CoreFarmerTests(unittest.TestCase):
         ]
         first = make_turn(tick=100, beacon_position=(30, 0), units=units)
         tactic.choose_actions(first)
-        self.assertEqual(
-            first.plan.model_dump(mode="json", exclude_none=True)["core_action"]["type"],
-            "WAIT",
+        self.assertNotEqual(
+            first.plan.model_dump(mode="json", exclude_none=True)
+            .get("core_action", {})
+            .get("type"),
+            "START_MOVE",
         )
 
         ready = make_turn(tick=108, beacon_position=(30, 0), units=units)
         tactic.choose_actions(ready)
-        self.assertEqual(
-            ready.plan.model_dump(mode="json", exclude_none=True)["core_action"]["type"],
+        self.assertNotEqual(
+            ready.plan.model_dump(mode="json", exclude_none=True)
+            .get("core_action", {})
+            .get("type"),
             "START_MOVE",
         )
 
@@ -1736,7 +1828,7 @@ class CoreFarmerTests(unittest.TestCase):
         tactic.choose_actions(turn)
         queued = turn.plan.model_dump(mode="json", exclude_none=True)
 
-        self.assertEqual(queued["core_action"]["type"], "WAIT")
+        self.assertNotEqual(queued.get("core_action", {}).get("type"), "START_MOVE")
 
     def test_recovery_ends_after_time_fleet_and_stock_recover(self) -> None:
         tactic = CoreFarmer(worker_target=6, beacon_policy="pursue")
@@ -1750,7 +1842,8 @@ class CoreFarmerTests(unittest.TestCase):
         tactic.choose_actions(turn)
         queued = turn.plan.model_dump(mode="json", exclude_none=True)
         self.assertFalse(tactic.recovery_mode)
-        self.assertEqual(queued["core_action"]["type"], "START_MOVE")
+        self.assertEqual(queued["core_action"]["type"], "SPAWN")
+        self.assertEqual(queued["core_action"]["unit_type"], "VANGUARD")
 
     def test_core_avoids_visible_vanguard_attack_cell(self) -> None:
         queued = plan(
@@ -1971,7 +2064,7 @@ class CoreFarmerTests(unittest.TestCase):
 
         self.assertEqual(len(tactic.healing_defender_ids), 1)
 
-    def test_core_continues_after_arrival_without_cargo(self) -> None:
+    def test_core_stays_after_arrival_without_cargo(self) -> None:
         queued = plan(
             make_turn(
                 beacon_position=(3, 0),
@@ -1986,7 +2079,7 @@ class CoreFarmerTests(unittest.TestCase):
                 ],
             )
         )
-        self.assertEqual(queued["core_action"]["type"], "START_MOVE")
+        self.assertNotEqual(queued.get("core_action", {}).get("type"), "START_MOVE")
 
     def test_core_waits_for_nearby_cargo_worker(self) -> None:
         queued = plan(
@@ -2007,14 +2100,14 @@ class CoreFarmerTests(unittest.TestCase):
         )
         self.assertEqual(queued["core_action"]["type"], "WAIT")
 
-    def test_core_keeps_moving_for_one_distant_cargo_worker(self) -> None:
+    def test_core_does_not_move_for_one_distant_cargo_worker(self) -> None:
         queued = plan(
             make_turn(
                 beacon_position=(5, 0),
                 units=[unit(WORKER_1, "WORKER", (4, 0), cargo=1)],
             )
         )
-        self.assertEqual(queued["core_action"]["type"], "START_MOVE")
+        self.assertNotEqual(queued.get("core_action", {}).get("type"), "START_MOVE")
 
     def test_core_waits_for_bulk_cargo_within_four_steps(self) -> None:
         queued = plan(
@@ -2197,7 +2290,7 @@ class CoreFarmerTests(unittest.TestCase):
             destinations.add(destination)
         self.assertEqual(len(destinations), 4)
 
-    def test_defense_fleet_holds_layered_opposite_posts(self) -> None:
+    def test_non_guard_combat_units_leave_static_posts_to_patrol(self) -> None:
         queued = plan(
             make_turn(
                 units=[
@@ -2209,9 +2302,9 @@ class CoreFarmerTests(unittest.TestCase):
             ),
             beacon_policy="hold",
         )
-        self.assertEqual(
+        self.assertIn(
+            "MOVE",
             {action["type"] for action in queued["unit_actions"].values()},
-            {"WAIT"},
         )
 
     def test_confirmed_isolated_core_uses_strike_group_and_keeps_guards(self) -> None:
@@ -2242,7 +2335,90 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertEqual(queued["unit_actions"][VANGUARD_3]["type"], "SWEEP")
         for ranger_id in (RANGER_2, RANGER_3, RANGER_4):
             self.assertEqual(queued["unit_actions"][ranger_id]["type"], "SHOOT")
-        self.assertEqual(queued["core_action"]["type"], "WAIT")
+        self.assertEqual(queued["core_action"]["type"], "SPAWN")
+
+    def test_main_assault_rallies_once_before_launching(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        target = enemy_core(ENEMY_1, (40, 0))
+        scattered = [
+            unit(VANGUARD_1, "VANGUARD", (0, 3)),
+            unit(VANGUARD_2, "VANGUARD", (5, 0)),
+            unit(VANGUARD_3, "VANGUARD", (30, 10)),
+            unit(VANGUARD_4, "VANGUARD", (-20, -5)),
+            unit(RANGER_1, "RANGER", (-2, 0)),
+            unit(RANGER_2, "RANGER", (6, 0)),
+            unit(RANGER_3, "RANGER", (31, 10)),
+            unit(RANGER_4, "RANGER", (-19, -5)),
+        ]
+        first = make_turn(tick=100, units=scattered, enemies=[target])
+
+        tactic.choose_actions(first)
+
+        self.assertFalse(tactic.core_raid_launched)
+        rally = tactic.core_raid_rally_position
+        self.assertIsNotNone(rally)
+        assert rally is not None
+
+        gathered = [
+            unit(VANGUARD_1, "VANGUARD", (0, 3)),
+            unit(VANGUARD_2, "VANGUARD", rally),
+            unit(VANGUARD_3, "VANGUARD", (rally[0] + 1, rally[1])),
+            unit(VANGUARD_4, "VANGUARD", (rally[0] - 1, rally[1])),
+            unit(RANGER_1, "RANGER", (-2, 0)),
+            unit(RANGER_2, "RANGER", (rally[0], rally[1] + 1)),
+            unit(RANGER_3, "RANGER", (rally[0] + 1, rally[1] + 1)),
+            unit(RANGER_4, "RANGER", (rally[0] - 1, rally[1] + 1)),
+        ]
+        second = make_turn(tick=101, units=gathered, enemies=[target])
+        tactic.choose_actions(second)
+
+        self.assertTrue(tactic.core_raid_launched)
+        self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
+
+    def test_core_target_score_avoids_protected_core_and_keeps_lock(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        near_core_id = "10000000-0000-4000-8000-000000000100"
+        far_core_id = "10000000-0000-4000-8000-000000000101"
+        defenders = [
+            unit(VANGUARD_1, "VANGUARD", (0, 3)),
+            unit(VANGUARD_2, "VANGUARD", (1, 0)),
+            unit(RANGER_1, "RANGER", (-2, 0)),
+            unit(RANGER_2, "RANGER", (2, 0)),
+        ]
+        protected = make_turn(
+            tick=100,
+            units=defenders,
+            enemies=[
+                enemy_core(near_core_id, (10, 0)),
+                enemy_core(far_core_id, (20, 0)),
+                unit(
+                    "10000000-0000-4000-8000-000000000102",
+                    "VANGUARD",
+                    (9, 0),
+                    controlled=False,
+                ),
+                unit(
+                    "10000000-0000-4000-8000-000000000103",
+                    "RANGER",
+                    (10, 1),
+                    controlled=False,
+                ),
+            ],
+        )
+
+        tactic.choose_actions(protected)
+        self.assertEqual(tactic.isolated_core_target_id, UUID(far_core_id))
+
+        unlocked_competitor = make_turn(
+            tick=101,
+            units=defenders,
+            enemies=[
+                enemy_core(near_core_id, (10, 0)),
+                enemy_core(far_core_id, (20, 0)),
+            ],
+        )
+        tactic.choose_actions(unlocked_competitor)
+        self.assertEqual(tactic.isolated_core_target_id, UUID(far_core_id))
 
     def test_minimum_defense_fleet_raids_exposed_core_and_keeps_guards(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
@@ -2295,11 +2471,14 @@ class CoreFarmerTests(unittest.TestCase):
 
         sighting = tactic.enemy_core_sightings[UUID(ENEMY_1)]
         self.assertEqual(sighting.observations, 3)
-        self.assertEqual(tactic.stationary_core_memory[UUID(ENEMY_1)].observations, 3)
+        self.assertGreaterEqual(
+            tactic.stationary_core_memory[UUID(ENEMY_1)].observations,
+            3,
+        )
         self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
         self.assertEqual(tactic.core_raid_spotter_id, UUID(WORKER_1))
 
-    def test_core_confirmation_resets_after_visibility_gap_expires(self) -> None:
+    def test_visible_core_is_reacquired_after_visibility_gap(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
         defenders = [
             unit(VANGUARD_1, "VANGUARD", (0, 3)),
@@ -2318,18 +2497,18 @@ class CoreFarmerTests(unittest.TestCase):
             tactic.choose_actions(turn)
 
         self.assertEqual(tactic.enemy_core_sightings[UUID(ENEMY_1)].observations, 1)
-        self.assertNotIn(UUID(ENEMY_1), tactic.stationary_core_memory)
-        self.assertIsNone(tactic.isolated_core_target_id)
+        self.assertIn(UUID(ENEMY_1), tactic.stationary_core_memory)
+        self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
 
-    def test_core_confirmation_resets_when_position_changes(self) -> None:
+    def test_visible_core_target_updates_when_position_changes(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
         defenders = [
             unit(VANGUARD_1, "VANGUARD", (0, 3)),
             unit(VANGUARD_2, "VANGUARD", (3, 0)),
             unit(RANGER_1, "RANGER", (-2, 0)),
-            unit(RANGER_2, "RANGER", (2, 2)),
+            unit(RANGER_2, "RANGER", (2, 0)),
         ]
-        for tick, position in ((100, (4, 0)), (101, None), (102, (5, 0))):
+        for tick, position in ((100, (4, 0)), (101, (5, 0))):
             turn = make_turn(
                 tick=tick,
                 resources=5,
@@ -2341,7 +2520,19 @@ class CoreFarmerTests(unittest.TestCase):
         sighting = tactic.enemy_core_sightings[UUID(ENEMY_1)]
         self.assertEqual(sighting.position, (5, 0))
         self.assertEqual(sighting.observations, 1)
-        self.assertNotIn(UUID(ENEMY_1), tactic.stationary_core_memory)
+        self.assertEqual(
+            tactic.stationary_core_memory[UUID(ENEMY_1)].position,
+            (5, 0),
+        )
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+        self.assertEqual(
+            queued["unit_actions"][RANGER_2],
+            {
+                "type": "SHOOT",
+                "target_id": ENEMY_1,
+                "expected_cell": [5, 0],
+            },
+        )
 
     def test_newly_exposing_worker_becomes_stationary_core_observer(self) -> None:
         tactic = CoreFarmer(worker_target=2, beacon_policy="hold")
@@ -2397,7 +2588,14 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertEqual(tactic.core_raid_spotter_id, UUID(WORKER_1))
         self.assertEqual(queued["unit_actions"][WORKER_1]["type"], "WAIT")
         self.assertEqual(queued["unit_actions"][VANGUARD_2]["type"], "SWEEP")
-        self.assertEqual(queued["unit_actions"][RANGER_2]["type"], "SHOOT")
+        self.assertEqual(
+            queued["unit_actions"][RANGER_2],
+            {
+                "type": "SHOOT",
+                "target_id": ENEMY_1,
+                "expected_cell": [30, 0],
+            },
+        )
         self.assertNotEqual(
             queued.get("unit_actions", {}).get(VANGUARD_1, {}).get("type"),
             "SWEEP",
@@ -2407,7 +2605,7 @@ class CoreFarmerTests(unittest.TestCase):
             "SHOOT",
         )
 
-    def test_combat_pressure_releases_core_raid_and_recalls_strike_pair(self) -> None:
+    def test_combat_pressure_keeps_core_raid_target(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
         defenders = [
             unit(VANGUARD_1, "VANGUARD", (0, -3)),
@@ -2439,12 +2637,16 @@ class CoreFarmerTests(unittest.TestCase):
         queued = pressured.plan.model_dump(mode="json", exclude_none=True)
 
         self.assertTrue(tactic.combat_pressure_active)
-        self.assertIsNone(tactic.isolated_core_target_id)
+        self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
         self.assertIsNone(tactic.stationary_unit_target_id)
         self.assertNotEqual(queued["unit_actions"][VANGUARD_2]["type"], "SWEEP")
         self.assertEqual(
             queued["unit_actions"][RANGER_2],
-            {"type": "SHOOT", "expected_cell": [5, 0]},
+            {
+                "type": "SHOOT",
+                "target_id": ENEMY_2,
+                "expected_cell": [5, 0],
+            },
         )
 
     def test_long_range_core_raid_accepts_operational_boundary(self) -> None:
@@ -2477,7 +2679,7 @@ class CoreFarmerTests(unittest.TestCase):
             "SHOOT",
         )
 
-    def test_long_range_core_raid_rejects_target_beyond_boundary(self) -> None:
+    def test_long_range_core_raid_accepts_target_beyond_old_boundary(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
         defenders = [
             unit(VANGUARD_1, "VANGUARD", (0, 3)),
@@ -2495,9 +2697,9 @@ class CoreFarmerTests(unittest.TestCase):
                 )
             )
 
-        self.assertIsNone(tactic.isolated_core_target_id)
+        self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
 
-    def test_active_core_raid_releases_when_strike_group_is_pulled_too_far(self) -> None:
+    def test_active_core_raid_persists_beyond_old_release_boundary(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
         defenders = [
             unit(VANGUARD_1, "VANGUARD", (0, 3)),
@@ -2547,9 +2749,9 @@ class CoreFarmerTests(unittest.TestCase):
             )
         )
 
-        self.assertIsNone(tactic.isolated_core_target_id)
+        self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
 
-    def test_long_range_core_raid_rejects_visible_protector(self) -> None:
+    def test_long_range_core_raid_accepts_visible_protector(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
         defenders = [
             unit(VANGUARD_1, "VANGUARD", (0, 3)),
@@ -2572,7 +2774,7 @@ class CoreFarmerTests(unittest.TestCase):
             )
 
         self.assertFalse(tactic.combat_pressure_active)
-        self.assertIsNone(tactic.isolated_core_target_id)
+        self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
 
     def test_spotted_core_dispatches_strike_pair_within_operational_range(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
@@ -2633,7 +2835,7 @@ class CoreFarmerTests(unittest.TestCase):
             "SHOOT",
         )
 
-    def test_core_raid_uses_cell_fire_during_short_visibility_gap(self) -> None:
+    def test_core_raid_clears_target_when_last_seen_cell_is_visible_and_empty(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
         defenders = [
             unit(VANGUARD_1, "VANGUARD", (0, -3)),
@@ -2655,9 +2857,11 @@ class CoreFarmerTests(unittest.TestCase):
         tactic.choose_actions(unseen)
         queued = unseen.plan.model_dump(mode="json", exclude_none=True)
 
-        self.assertEqual(
-            queued["unit_actions"][RANGER_2],
-            {"type": "SHOOT", "expected_cell": [30, 0]},
+        self.assertIsNone(tactic.isolated_core_target_id)
+        self.assertNotIn(UUID(ENEMY_1), tactic.stationary_core_memory)
+        self.assertNotEqual(
+            queued.get("unit_actions", {}).get(RANGER_2, {}).get("type"),
+            "SHOOT",
         )
 
     def test_core_raid_releases_position_when_strike_group_observes_it_empty(self) -> None:
@@ -2689,7 +2893,7 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertIsNone(tactic.isolated_core_target_id)
         self.assertNotIn(UUID(ENEMY_1), tactic.stationary_core_memory)
 
-    def test_nearby_combat_unit_takes_priority_over_exposed_core(self) -> None:
+    def test_exposed_core_remains_priority_near_combat_unit(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
         defenders = [
             unit(VANGUARD_1, "VANGUARD", (0, 3)),
@@ -2711,10 +2915,10 @@ class CoreFarmerTests(unittest.TestCase):
 
         queued = turn.plan.model_dump(mode="json", exclude_none=True)
         self.assertTrue(tactic.combat_pressure_active)
-        self.assertIsNone(tactic.isolated_core_target_id)
+        self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
         self.assertIsNone(tactic.stationary_unit_target_id)
-        self.assertNotEqual(queued["unit_actions"][VANGUARD_2]["type"], "SWEEP")
-        self.assertEqual(queued["unit_actions"][RANGER_2]["type"], "WAIT")
+        self.assertEqual(queued["unit_actions"][VANGUARD_2]["type"], "SWEEP")
+        self.assertEqual(queued["unit_actions"][RANGER_2]["type"], "SHOOT")
         self.assertEqual(queued["core_action"]["type"], "START_MOVE")
 
     def test_core_raid_continues_while_own_core_is_moving_away(self) -> None:
@@ -2782,7 +2986,7 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertEqual(queued["unit_actions"][VANGUARD_2]["type"], "SWEEP")
         self.assertEqual(queued["unit_actions"][RANGER_2]["type"], "SHOOT")
 
-    def test_static_worker_uses_only_two_rangers_with_full_defense_fleet(self) -> None:
+    def test_static_worker_uses_nearest_mixed_pair_with_full_defense_fleet(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
         defenders = [
             unit(VANGUARD_1, "VANGUARD", (0, -3)),
@@ -2804,11 +3008,11 @@ class CoreFarmerTests(unittest.TestCase):
 
         actions = turn.plan.model_dump(mode="json", exclude_none=True)["unit_actions"]
         self.assertEqual(tactic.stationary_unit_target_id, UUID(ENEMY_1))
-        for ranger_id in (RANGER_3, RANGER_4):
-            self.assertEqual(actions[ranger_id]["type"], "SHOOT")
-        for ranger_id in (RANGER_1, RANGER_2):
+        self.assertEqual(actions[RANGER_4]["type"], "SHOOT")
+        self.assertEqual(actions[VANGUARD_3]["type"], "MOVE")
+        for ranger_id in (RANGER_1, RANGER_2, RANGER_3):
             self.assertNotEqual(actions.get(ranger_id, {}).get("type"), "SHOOT")
-        for vanguard_id in (VANGUARD_1, VANGUARD_2, VANGUARD_3):
+        for vanguard_id in (VANGUARD_1, VANGUARD_2):
             self.assertNotEqual(actions.get(vanguard_id, {}).get("type"), "SWEEP")
 
     def test_high_hp_static_vanguard_adds_bounded_vanguard_support(self) -> None:
@@ -2840,15 +3044,14 @@ class CoreFarmerTests(unittest.TestCase):
             tactic.choose_actions(turn)
 
         actions = turn.plan.model_dump(mode="json", exclude_none=True)["unit_actions"]
-        for ranger_id in (RANGER_3, RANGER_4):
-            self.assertEqual(actions[ranger_id]["type"], "SHOOT")
+        self.assertEqual(actions[RANGER_4]["type"], "SHOOT")
         self.assertEqual(actions[VANGUARD_3]["type"], "SWEEP")
         for vanguard_id in (VANGUARD_1, VANGUARD_2):
             self.assertNotEqual(actions.get(vanguard_id, {}).get("type"), "SWEEP")
-        for ranger_id in (RANGER_1, RANGER_2):
+        for ranger_id in (RANGER_1, RANGER_2, RANGER_3):
             self.assertNotEqual(actions.get(ranger_id, {}).get("type"), "SHOOT")
 
-    def test_moving_worker_does_not_leave_stale_clearance_target(self) -> None:
+    def test_moving_enemy_worker_remains_an_attack_target(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
         defenders = [
             unit(VANGUARD_1, "VANGUARD", (0, 3)),
@@ -2866,17 +3069,11 @@ class CoreFarmerTests(unittest.TestCase):
             tactic.choose_actions(turn)
 
         queued = turn.plan.model_dump(mode="json", exclude_none=True)
-        self.assertIsNone(tactic.stationary_unit_target_id)
-        self.assertNotEqual(
-            queued.get("unit_actions", {}).get(VANGUARD_2, {}).get("type"),
-            "SWEEP",
-        )
-        self.assertNotEqual(
-            queued.get("unit_actions", {}).get(RANGER_2, {}).get("type"),
-            "SHOOT",
-        )
+        self.assertEqual(tactic.stationary_unit_target_id, UUID(ENEMY_1))
+        self.assertEqual(queued["unit_actions"][VANGUARD_2]["type"], "MOVE")
+        self.assertEqual(queued["unit_actions"][RANGER_2]["type"], "SHOOT")
 
-    def test_static_combat_units_protect_each_other_from_clearance(self) -> None:
+    def test_visible_combat_units_do_not_protect_each_other_from_attack(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
         defenders = [
             unit(VANGUARD_1, "VANGUARD", (0, 3)),
@@ -2897,7 +3094,7 @@ class CoreFarmerTests(unittest.TestCase):
             )
             tactic.choose_actions(turn)
 
-        self.assertIsNone(tactic.stationary_unit_target_id)
+        self.assertIsNotNone(tactic.stationary_unit_target_id)
 
     def test_unprotected_static_combat_unit_can_be_cleared(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
@@ -2918,10 +3115,105 @@ class CoreFarmerTests(unittest.TestCase):
 
         queued = turn.plan.model_dump(mode="json", exclude_none=True)
         self.assertTrue(tactic.combat_pressure_active)
-        self.assertIsNone(tactic.stationary_unit_target_id)
+        self.assertEqual(tactic.stationary_unit_target_id, UUID(ENEMY_1))
         self.assertEqual(queued["unit_actions"][RANGER_2]["type"], "SHOOT")
 
-    def test_isolated_core_hunt_requires_free_capture_capacity(self) -> None:
+    def test_assault_pair_enters_enemy_ranger_threat_range(self) -> None:
+        turn = make_turn(
+            units=[
+                unit(VANGUARD_1, "VANGUARD", (0, 3)),
+                unit(VANGUARD_2, "VANGUARD", (0, 2)),
+                unit(RANGER_1, "RANGER", (-2, 0)),
+                unit(RANGER_2, "RANGER", (0, 1)),
+            ],
+            enemies=[unit(ENEMY_1, "RANGER", (5, 1), controlled=False)],
+            obstacles=[(-1, 1)],
+        )
+
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        tactic.choose_actions(turn)
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+
+        self.assertEqual(tactic.stationary_unit_target_id, UUID(ENEMY_1))
+        self.assertEqual(
+            queued["unit_actions"][RANGER_2],
+            {"type": "MOVE", "direction": "RIGHT"},
+        )
+
+    def test_unit_assaults_use_pairs_reinforcements_and_core_guards(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        force = [
+            unit(VANGUARD_1, "VANGUARD", (0, 3)),
+            unit(VANGUARD_2, "VANGUARD", (4, 1)),
+            unit(VANGUARD_3, "VANGUARD", (5, 1)),
+            unit(VANGUARD_4, "VANGUARD", (6, 1)),
+            unit(RANGER_1, "RANGER", (-2, 0)),
+            unit(RANGER_2, "RANGER", (4, -1)),
+            unit(RANGER_3, "RANGER", (5, -1)),
+            unit(RANGER_4, "RANGER", (6, -1)),
+        ]
+
+        single = make_turn(
+            units=force,
+            enemies=[unit(ENEMY_1, "WORKER", (10, 0), controlled=False)],
+        )
+        single_target = single.visible_enemies[0]
+        vanguards, rangers = tactic._strike_group_ids(single, single_target)
+        self.assertEqual((len(vanguards), len(rangers)), (1, 1))
+        self.assertNotIn(UUID(VANGUARD_1), vanguards)
+        self.assertNotIn(UUID(RANGER_1), rangers)
+
+        reinforced = make_turn(
+            units=force,
+            enemies=[
+                unit(ENEMY_1, "RANGER", (10, 0), controlled=False),
+                unit(ENEMY_2, "VANGUARD", (11, 0), controlled=False),
+            ],
+        )
+        reinforced_target = reinforced.visible_enemies[0]
+        vanguards, rangers = tactic._strike_group_ids(
+            reinforced,
+            reinforced_target,
+        )
+        self.assertEqual((len(vanguards), len(rangers)), (2, 2))
+
+        full_assault_enemies = [
+            unit(
+                f"10000000-0000-4000-8000-{index:012x}",
+                "RANGER" if index % 2 else "VANGUARD",
+                (10 + index, 0),
+                controlled=False,
+            )
+            for index in range(1, 5)
+        ]
+        full_assault = make_turn(units=force, enemies=full_assault_enemies)
+        full_target = full_assault.visible_enemies[0]
+        vanguards, rangers = tactic._strike_group_ids(full_assault, full_target)
+        self.assertEqual((len(vanguards), len(rangers)), (3, 3))
+        self.assertNotIn(UUID(VANGUARD_1), vanguards)
+        self.assertNotIn(UUID(RANGER_1), rangers)
+
+    def test_unit_assault_falls_back_to_same_type_pair(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        turn = make_turn(
+            units=[
+                unit(VANGUARD_1, "VANGUARD", (0, 3)),
+                unit(RANGER_1, "RANGER", (-2, 0)),
+                unit(RANGER_2, "RANGER", (4, -1)),
+                unit(RANGER_3, "RANGER", (5, -1)),
+            ],
+            enemies=[unit(ENEMY_1, "WORKER", (10, 0), controlled=False)],
+        )
+
+        vanguards, rangers = tactic._strike_group_ids(
+            turn,
+            turn.visible_enemies[0],
+        )
+
+        self.assertEqual(vanguards, set())
+        self.assertEqual(rangers, {UUID(RANGER_2), UUID(RANGER_3)})
+
+    def test_core_hunt_does_not_require_free_capture_capacity(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
         defenders = [
             unit(VANGUARD_1, "VANGUARD", (0, -3)),
@@ -2941,7 +3233,7 @@ class CoreFarmerTests(unittest.TestCase):
             )
             tactic.choose_actions(turn)
 
-        self.assertIsNone(tactic.isolated_core_target_id)
+        self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
 
     def test_capture_healing_and_spawn_prices_are_logged_structurally(self) -> None:
         turn = make_turn(
@@ -2997,7 +3289,7 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertIn("threat_level=NORMAL", diagnostics)
         self.assertIn("threat_reason=NONE", diagnostics)
 
-    def test_nearby_combat_unit_protects_core_from_raid(self) -> None:
+    def test_nearby_combat_unit_does_not_cancel_core_raid(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
         units = [
             unit(VANGUARD_1, "VANGUARD", (0, -3)),
@@ -3023,7 +3315,7 @@ class CoreFarmerTests(unittest.TestCase):
             tactic.choose_actions(turn)
 
         queued = turn.plan.model_dump(mode="json", exclude_none=True)
-        self.assertIsNone(tactic.isolated_core_target_id)
+        self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
         self.assertNotEqual(
             queued.get("unit_actions", {}).get(VANGUARD_1, {}).get("type"),
             "SWEEP",
@@ -3078,29 +3370,29 @@ class CoreFarmerTests(unittest.TestCase):
         tactic.choose_actions(reacquired)
         self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
 
-    def test_worker_limit_reserves_seven_defense_slots(self) -> None:
-        CoreFarmer(worker_target=23)
-        with self.assertRaisesRegex(ValueError, "between 1 and 23"):
-            CoreFarmer(worker_target=24)
+    def test_worker_limit_matches_aggressive_force_plan(self) -> None:
+        CoreFarmer(worker_target=18)
+        with self.assertRaisesRegex(ValueError, "between 1 and 18"):
+            CoreFarmer(worker_target=19)
 
-    def test_population_hard_stops_at_30_without_self_destruct(self) -> None:
+    def test_population_hard_stops_at_48_without_self_destruct(self) -> None:
         units = [
             unit(
                 f"20000000-0000-4000-8000-{index:012x}",
                 (
                     "WORKER"
-                    if index < 23
+                    if index < 18
                     else "VANGUARD"
-                    if index < 26
+                    if index < 32
                     else "RANGER"
                 ),
                 (20 + index, 20),
-                cargo=0 if index < 23 else None,
+                cargo=0 if index < 18 else None,
             )
-            for index in range(30)
+            for index in range(48)
         ]
         turn = make_turn(resources=200, units=units)
-        tactic = CoreFarmer(worker_target=23, beacon_policy="hold")
+        tactic = CoreFarmer(worker_target=18, beacon_policy="hold")
         tactic.choose_actions(turn)
         queued = turn.plan.model_dump(mode="json", exclude_none=True)
 
@@ -3115,53 +3407,31 @@ class CoreFarmerTests(unittest.TestCase):
             )
         )
 
-    def test_dynamic_worker_price_stages(self) -> None:
-        fleet = [
-            unit(VANGUARD_1, "VANGUARD", (3, 0)),
-            unit(VANGUARD_2, "VANGUARD", (4, 0)),
-            unit(VANGUARD_3, "VANGUARD", (4, 1)),
-            unit(RANGER_1, "RANGER", (5, 0)),
-            unit(RANGER_2, "RANGER", (5, 1)),
-            unit(RANGER_3, "RANGER", (5, 2)),
-            unit(RANGER_4, "RANGER", (5, 3)),
-        ]
+    def test_force_stage_order(self) -> None:
         cases = (
-            (12, 19, 19, 20),
-            (13, 20, 42, 43),
-            (17, 24, 53, 54),
-            (22, 29, 22, 23),
+            ((0, 0, 0), UnitType.WORKER),
+            ((6, 0, 0), UnitType.VANGUARD),
+            ((6, 2, 0), UnitType.RANGER),
+            ((6, 2, 2), UnitType.WORKER),
+            ((12, 2, 2), UnitType.RANGER),
+            ((18, 14, 8), UnitType.RANGER),
+            ((18, 14, 16), None),
         )
-        for workers_count, population, blocked, expanding in cases:
-            with self.subTest(population=population):
-                blocked_turn = make_turn(
-                    resources=blocked,
-                    units=self._workers(workers_count) + fleet,
-                )
-                self.assertNotEqual(
-                    plan(blocked_turn, beacon_policy="hold")
-                    .get("core_action", {})
-                    .get("unit_type"),
-                    "WORKER",
-                )
-                expanding_turn = make_turn(
-                    resources=expanding,
-                    units=self._workers(workers_count) + fleet,
-                )
-                self.assertEqual(
-                    plan(expanding_turn, beacon_policy="hold")["core_action"][
-                        "unit_type"
-                    ],
-                    "WORKER",
+        for counts, expected in cases:
+            with self.subTest(counts=counts):
+                self.assertIs(
+                    _next_force_unit_type(18, *counts),
+                    expected,
                 )
 
     def test_emergency_defenders_use_dynamic_price_preview(self) -> None:
         vanguard_turn = dict(
-            units=[unit(WORKER_1, "WORKER", (1, 0), cargo=0)],
+            units=self._workers(6),
             enemies=[unit(ENEMY_1, "VANGUARD", (2, 0), controlled=False)],
             obstacles=[(-1, 0), (0, -1), (0, 1)],
         )
         ranger_turn = dict(
-            units=self._workers(4),
+            units=self._workers(6),
             enemies=[unit(ENEMY_1, "RANGER", (5, 0), controlled=False)],
             obstacles=[(-1, 0), (1, 0), (0, -1), (0, 1)],
         )
@@ -3196,7 +3466,7 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertEqual(expanding["core_action"]["type"], "SPAWN")
         self.assertEqual(expanding["core_action"]["unit_type"], "WORKER")
 
-    def test_six_workers_accumulate_to_25_before_expanding(self) -> None:
+    def test_six_workers_start_the_first_vanguard_wave(self) -> None:
         workers = self._workers(6)
         accumulating = plan(make_turn(resources=24, units=workers))
         self.assertNotEqual(
@@ -3206,9 +3476,9 @@ class CoreFarmerTests(unittest.TestCase):
 
         expanding = plan(make_turn(resources=25, units=workers))
         self.assertEqual(expanding["core_action"]["type"], "SPAWN")
-        self.assertEqual(expanding["core_action"]["unit_type"], "WORKER")
+        self.assertEqual(expanding["core_action"]["unit_type"], "VANGUARD")
 
-    def test_seven_workers_accumulate_to_20_before_expanding(self) -> None:
+    def test_seven_workers_continue_the_first_vanguard_wave(self) -> None:
         workers = self._workers(7)
         accumulating = plan(make_turn(resources=19, units=workers))
         self.assertNotEqual(
@@ -3218,15 +3488,12 @@ class CoreFarmerTests(unittest.TestCase):
 
         expanding = plan(make_turn(resources=20, units=workers))
         self.assertEqual(expanding["core_action"]["type"], "SPAWN")
-        self.assertEqual(expanding["core_action"]["unit_type"], "WORKER")
+        self.assertEqual(expanding["core_action"]["unit_type"], "VANGUARD")
 
-    def test_eight_workers_build_early_defense_before_late_expansion(self) -> None:
+    def test_eight_workers_balance_the_first_combat_wave(self) -> None:
         workers = self._workers(8)
         accumulating = plan(make_turn(resources=24, units=workers))
-        self.assertNotEqual(
-            accumulating.get("core_action", {}).get("unit_type"),
-            "VANGUARD",
-        )
+        self.assertEqual(accumulating["core_action"]["unit_type"], "VANGUARD")
 
         first_vanguard = plan(make_turn(resources=25, units=workers))
         self.assertEqual(first_vanguard["core_action"]["unit_type"], "VANGUARD")
@@ -3236,10 +3503,10 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertEqual(first_ranger["core_action"]["unit_type"], "RANGER")
 
         ranger = unit(RANGER_1, "RANGER", (4, 0))
-        resumed_expansion = plan(
+        balanced_vanguard = plan(
             make_turn(resources=25, units=workers + [vanguard, ranger])
         )
-        self.assertEqual(resumed_expansion["core_action"]["unit_type"], "WORKER")
+        self.assertEqual(balanced_vanguard["core_action"]["unit_type"], "VANGUARD")
 
     def test_early_defense_uses_dynamic_price_preview(self) -> None:
         workers = self._workers(8)
@@ -3253,13 +3520,13 @@ class CoreFarmerTests(unittest.TestCase):
             "arena_farmer.unit_cost",
             side_effect=lambda kind, _population: prices[kind],
         ):
-            vanguard_wait = plan(make_turn(resources=54, units=workers))
-            vanguard_spawn = plan(make_turn(resources=55, units=workers))
+            vanguard_wait = plan(make_turn(resources=39, units=workers))
+            vanguard_spawn = plan(make_turn(resources=40, units=workers))
             ranger_wait = plan(
-                make_turn(resources=64, units=workers + [vanguard])
+                make_turn(resources=44, units=workers + [vanguard])
             )
             ranger_spawn = plan(
-                make_turn(resources=65, units=workers + [vanguard])
+                make_turn(resources=45, units=workers + [vanguard])
             )
 
         self.assertNotEqual(
@@ -3273,23 +3540,23 @@ class CoreFarmerTests(unittest.TestCase):
         )
         self.assertEqual(ranger_spawn["core_action"]["unit_type"], "RANGER")
 
-    def test_mature_fleet_keeps_15_resource_defense_reserve(self) -> None:
+    def test_mature_fleet_keeps_10_resource_core_reserve(self) -> None:
         workers = self._workers(12)
         early_fleet = [
             unit(VANGUARD_1, "VANGUARD", (3, 0)),
             unit(RANGER_1, "RANGER", (4, 0)),
         ]
-        accumulating = plan(make_turn(resources=24, units=workers + early_fleet))
+        with patch("arena_farmer.unit_cost", return_value=30):
+            accumulating = plan(make_turn(resources=39, units=workers + early_fleet))
+            expanding = plan(make_turn(resources=40, units=workers + early_fleet))
         self.assertNotEqual(
             accumulating.get("core_action", {}).get("unit_type"),
             "VANGUARD",
         )
-
-        expanding = plan(make_turn(resources=25, units=workers + early_fleet))
         self.assertEqual(expanding["core_action"]["type"], "SPAWN")
         self.assertEqual(expanding["core_action"]["unit_type"], "VANGUARD")
 
-    def test_mature_fleet_builds_three_vanguards_before_four_rangers(self) -> None:
+    def test_mature_fleet_completes_first_wave_before_late_wave(self) -> None:
         workers = self._workers(12)
         first_vanguard = unit(VANGUARD_1, "VANGUARD", (3, 0))
         second_vanguard = unit(VANGUARD_2, "VANGUARD", (4, 0))
@@ -3314,7 +3581,7 @@ class CoreFarmerTests(unittest.TestCase):
                 + [first_vanguard, second_vanguard, first_ranger],
             )
         )
-        self.assertEqual(third_vanguard_plan["core_action"]["unit_type"], "VANGUARD")
+        self.assertEqual(third_vanguard_plan["core_action"]["unit_type"], "RANGER")
 
         second_ranger_plan = plan(
             make_turn(
@@ -3345,11 +3612,11 @@ class CoreFarmerTests(unittest.TestCase):
         ]
         with patch("arena_farmer.unit_cost", return_value=30):
             accumulating = plan(
-                make_turn(resources=44, units=workers + vanguards[:2] + rangers),
+                make_turn(resources=39, units=workers + vanguards[:2] + rangers),
                 beacon_policy="hold",
             )
             spawning = plan(
-                make_turn(resources=45, units=workers + vanguards[:2] + rangers),
+                make_turn(resources=40, units=workers + vanguards[:2] + rangers),
                 beacon_policy="hold",
             )
 
@@ -3362,14 +3629,14 @@ class CoreFarmerTests(unittest.TestCase):
         with patch("arena_farmer.unit_cost", return_value=30):
             ranger_wait = plan(
                 make_turn(
-                    resources=44,
+                    resources=39,
                     units=workers + vanguards + rangers[:3],
                 ),
                 beacon_policy="hold",
             )
             ranger_spawn = plan(
                 make_turn(
-                    resources=45,
+                    resources=40,
                     units=workers + vanguards + rangers[:3],
                 ),
                 beacon_policy="hold",
@@ -3436,6 +3703,54 @@ class CoreFarmerTests(unittest.TestCase):
         )
         self.assertEqual(queued["unit_actions"][WORKER_1]["type"], "MOVE")
 
+    def test_mature_fleet_reserves_core_cell_for_affordable_spawn(self) -> None:
+        workers = self._workers(20)
+        workers[0] = unit(WORKER_1, "WORKER", (0, 0), cargo=1)
+        queued = plan(
+            make_turn(
+                resources=75,
+                units=workers
+                + [
+                    unit(VANGUARD_1, "VANGUARD", (3, 0)),
+                    unit(VANGUARD_2, "VANGUARD", (4, 0)),
+                    unit(VANGUARD_3, "VANGUARD", (5, 0)),
+                    unit(RANGER_1, "RANGER", (0, 3)),
+                    unit(RANGER_2, "RANGER", (0, 4)),
+                    unit(RANGER_3, "RANGER", (0, 5)),
+                    unit(RANGER_4, "RANGER", (0, 6)),
+                ],
+            )
+        )
+
+        self.assertEqual(queued["unit_actions"][WORKER_1]["type"], "MOVE")
+        self.assertEqual(queued["core_action"]["type"], "SPAWN")
+        self.assertEqual(queued["core_action"]["unit_type"], "VANGUARD")
+
+    def test_spawn_reservation_blocks_new_cargo_delivery(self) -> None:
+        workers = self._workers(20)
+        workers[0] = unit(WORKER_1, "WORKER", (1, 0), cargo=1)
+        queued = plan(
+            make_turn(
+                resources=75,
+                units=workers
+                + [
+                    unit(VANGUARD_1, "VANGUARD", (3, 0)),
+                    unit(VANGUARD_2, "VANGUARD", (4, 0)),
+                    unit(VANGUARD_3, "VANGUARD", (5, 0)),
+                    unit(RANGER_1, "RANGER", (0, 3)),
+                    unit(RANGER_2, "RANGER", (0, 4)),
+                    unit(RANGER_3, "RANGER", (0, 5)),
+                    unit(RANGER_4, "RANGER", (0, 6)),
+                ],
+            )
+        )
+
+        self.assertEqual(queued["core_action"]["type"], "SPAWN")
+        self.assertNotEqual(
+            queued["unit_actions"][WORKER_1],
+            {"type": "MOVE", "direction": "LEFT"},
+        )
+
     def test_departing_worker_frees_core_spawn_slot(self) -> None:
         queued = plan(
             make_turn(
@@ -3500,7 +3815,7 @@ class CoreFarmerTests(unittest.TestCase):
         )
 
         self.assertEqual(queued["unit_actions"][RANGER_1]["type"], "SHOOT")
-        self.assertNotIn("target_id", queued["unit_actions"][RANGER_1])
+        self.assertEqual(queued["unit_actions"][RANGER_1]["target_id"], ENEMY_1)
         self.assertEqual(queued["unit_actions"][RANGER_1]["expected_cell"], [3, 0])
 
     def test_obstacle_blocks_core_threat_counterattack(self) -> None:
@@ -3533,7 +3848,7 @@ class CoreFarmerTests(unittest.TestCase):
         )
         self.assertEqual(queued["unit_actions"][VANGUARD_1]["type"], "SWEEP")
         self.assertEqual(queued["unit_actions"][RANGER_1]["type"], "SHOOT")
-        self.assertNotIn("target_id", queued["unit_actions"][RANGER_1])
+        self.assertEqual(queued["unit_actions"][RANGER_1]["target_id"], ENEMY_2)
         self.assertEqual(queued["unit_actions"][RANGER_1]["expected_cell"], [0, 2])
 
     def test_pursuing_enemy_is_counterattacked_while_core_retreats(self) -> None:
@@ -3669,7 +3984,7 @@ class CoreFarmerTests(unittest.TestCase):
             tactic.threat_assessment.global_posture,
             GlobalPosture.ALERT,
         )
-        self.assertEqual(queued["core_action"]["type"], "WAIT")
+        self.assertEqual(queued["core_action"]["type"], "SPAWN")
 
     def test_distant_stationary_enemy_does_not_pause_production(self) -> None:
         tactic = CoreFarmer(worker_target=2, beacon_policy="hold")
@@ -3705,9 +4020,9 @@ class CoreFarmerTests(unittest.TestCase):
             units=[unit(WORKER_1, "WORKER", (-100, -100), cargo=0)],
             events=[event],
         )
-        with patch("arena_farmer.unit_cost", return_value=30):
-            waiting = plan(make_turn(resources=29, **turn_fields))
-            spawning = plan(make_turn(resources=30, **turn_fields))
+        with patch("arena_farmer.unit_cost", return_value=9):
+            waiting = plan(make_turn(resources=8, **turn_fields))
+            spawning = plan(make_turn(resources=9, **turn_fields))
 
         self.assertNotEqual(
             waiting.get("core_action", {}).get("type"),
@@ -4069,7 +4384,7 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertFalse(tactic.combat_pressure_active)
         self.assertEqual(tactic.recent_attack_threats, {})
 
-    def test_remote_interceptor_forces_raid_squad_to_disengage(self) -> None:
+    def test_remote_interceptor_does_not_cancel_core_raid(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
         defenders = [
             unit(VANGUARD_1, "VANGUARD", (0, 3)),
@@ -4100,11 +4415,8 @@ class CoreFarmerTests(unittest.TestCase):
         tactic.choose_actions(intercepted)
         queued = intercepted.plan.model_dump(mode="json", exclude_none=True)
 
-        self.assertIsNone(tactic.isolated_core_target_id)
-        self.assertEqual(
-            tactic.squad_return_ids,
-            {UUID(VANGUARD_2), UUID(RANGER_2)},
-        )
+        self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
+        self.assertEqual(tactic.squad_return_ids, set())
         self.assertTrue(tactic.combat_pressure_active)
         self.assertEqual(tactic.threat_assessment.level, ThreatLevel.ENGAGED)
         self.assertEqual(
@@ -4113,7 +4425,7 @@ class CoreFarmerTests(unittest.TestCase):
         )
         self.assertEqual(queued["unit_actions"][VANGUARD_2]["type"], "SWEEP")
         self.assertEqual(queued["unit_actions"][RANGER_2]["type"], "SHOOT")
-        self.assertNotEqual(queued["core_action"]["type"], "START_MOVE")
+        self.assertNotEqual(queued.get("core_action", {}).get("type"), "START_MOVE")
 
     def test_evading_remote_scout_keeps_returning_after_contact_lost(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
@@ -4205,7 +4517,74 @@ class CoreFarmerTests(unittest.TestCase):
         )
         self.assertEqual(
             queued["unit_actions"][RANGER_1],
-            {"type": "SHOOT", "expected_cell": [3, 0]},
+            {
+                "type": "SHOOT",
+                "target_id": ENEMY_2,
+                "expected_cell": [3, 0],
+            },
+        )
+
+
+    def test_visible_enemy_core_is_locked_immediately(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="pursue")
+        turn = make_turn(
+            tick=100,
+            units=[
+                unit(VANGUARD_1, "VANGUARD", (0, 3)),
+                unit(VANGUARD_2, "VANGUARD", (3, 0)),
+                unit(RANGER_1, "RANGER", (-2, 0)),
+                unit(RANGER_2, "RANGER", (2, 0)),
+            ],
+            enemies=[enemy_core(ENEMY_1, (4, 0))],
+        )
+
+        tactic.choose_actions(turn)
+
+        self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
+
+    def test_strong_force_dispatches_a_vanguard_to_ground_beacon(self) -> None:
+        workers = [
+            unit(
+                f"30000000-0000-4000-8000-{index:012x}",
+                "WORKER",
+                (index + 20, 20),
+                cargo=0,
+            )
+            for index in range(18)
+        ]
+        vanguards = [
+            unit(
+                f"31000000-0000-4000-8000-{index:012x}",
+                "VANGUARD",
+                (index + 1, 8),
+            )
+            for index in range(14)
+        ]
+        rangers = [
+            unit(
+                f"32000000-0000-4000-8000-{index:012x}",
+                "RANGER",
+                (index + 1, -8),
+            )
+            for index in range(8)
+        ]
+        tactic = CoreFarmer(worker_target=18, beacon_policy="pursue")
+        turn = make_turn(
+            tick=100,
+            resources=30,
+            beacon_position=(12, 0),
+            beacon_status="GROUND",
+            units=workers + vanguards + rangers,
+        )
+
+        tactic.choose_actions(turn)
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+
+        self.assertIsNotNone(tactic.beacon_runner_id)
+        self.assertIn(str(tactic.beacon_runner_id), queued["unit_actions"])
+        self.assertEqual(
+            queued["unit_actions"][str(tactic.beacon_runner_id)]["type"],
+            "MOVE",
         )
 
 

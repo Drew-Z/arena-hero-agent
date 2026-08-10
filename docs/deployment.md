@@ -20,10 +20,10 @@ Install Python 3.11 or newer, then run from PowerShell:
 .\start_agent.ps1
 ```
 
-Useful overrides:
+Useful overrides (the aggressive default is `18 Worker` and `pursue`):
 
 ```powershell
-.\start_agent.ps1 -WorkerTarget 12 -BeaconPolicy retreat -NoCompatibilityMarker
+.\start_agent.ps1 -WorkerTarget 18 -BeaconPolicy pursue -HistoryDb .\arena_history.sqlite3 -NoCompatibilityMarker
 ```
 
 Stop with `Ctrl+C`. When using `start_agent.cmd`, an initialization failure pauses the terminal so the error remains visible.
@@ -46,10 +46,12 @@ falling back:
 PYTHON_BIN="$(command -v python3.11)" sh scripts/bootstrap.sh
 ```
 
-Set `ARENA_WORKER_TARGET`, `ARENA_BEACON_POLICY`, or `ARENA_HERO_ENV_FILE` to override defaults. Additional CLI arguments are passed through:
+Set `ARENA_WORKER_TARGET`, `ARENA_BEACON_POLICY`, `ARENA_HISTORY_DB`, or
+`ARENA_HERO_ENV_FILE` to override defaults. Additional CLI arguments are passed
+through:
 
 ```bash
-ARENA_WORKER_TARGET=10 sh scripts/run-agent.sh --base-url https://api.arenahero.io
+ARENA_WORKER_TARGET=18 ARENA_BEACON_POLICY=pursue sh scripts/run-agent.sh --base-url https://api.arenahero.io
 ```
 
 Stop with `Ctrl+C`.
@@ -85,10 +87,14 @@ failure code and Docker's `unless-stopped` policy rebuilds the process. A stale
 health status alone does not restart a Docker container, so the deadline is part
 of the unattended recovery path.
 
+Compose also starts a separate `dashboard` service on `127.0.0.1:8765`. It
+mounts the Agent's `/data/history.sqlite3` volume read-only and provides current
+state, historical vision replay, events, and public leaderboards.
+
 Change the strategy without editing Compose:
 
 ```bash
-ARENA_WORKER_TARGET=10 ARENA_BEACON_POLICY=hold docker compose up -d
+ARENA_WORKER_TARGET=18 ARENA_BEACON_POLICY=pursue docker compose up -d
 ```
 
 Stop and retain the image:

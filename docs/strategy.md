@@ -1,85 +1,73 @@
-# Strategy Profile
+# Aggressive Expansion Strategy
 
-The default profile optimizes for long-term Core survival and resource accumulation rather than Beacon progress or indiscriminate combat.
+The default profile converts resource income into a large combat force, then
+uses that force to remove nearby opponents and contest the Champion Beacon.
+Arena Hero does not expose a territory-ownership command, so expansion means
+exploration, outward patrols, enemy removal, and durable map presence.
 
 ## Population Plan
 
-The mature target is:
+| Stage | Worker | Vanguard | Ranger | Total | Intent |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Establish | 6 | 2 | 2 | 10 | Keep harvesting while establishing the first attack screen. |
+| Mobilize | 12 | 6 | 8 | 26 | Build enough damage to attack nearby Cores continuously. |
+| Overwhelm | 18 | 14 | 16 | 48 | Maintain two Core guards and send the rest outward. |
 
-| Unit | Target | Role |
-| --- | ---: | --- |
-| Worker | 23 | Harvest, deposit, scout, observe, and recover dropped cargo. |
-| Vanguard | 3 | Outer screen, route screening, durable Core defense, and bounded assault reinforcement. |
-| Ranger | 4 | Inner Core defense and ranged stationary-target clearing. |
-| Total | 30 | Provides the 150-resource Core capacity target. |
+The Core capacity at the final population is `max(10, 48 * 5) = 240`.
+There is no upkeep in gameplay v0.14. Every spawn branch previews the current
+price with the official SDK's `unit_cost()`; the settled spawn event remains
+authoritative. Ordinary production keeps a ten-resource Core reserve, while an
+immediate threat can spend it on emergency combat units.
 
-Gameplay v0.14 has no per-Tick upkeep or maintenance damage. Production still
-reserves resources for healing, shield repair, and emergency replacement. Every
-spawn branch previews the current price with the official SDK's `unit_cost()`;
-the settled `CORE_SPAWN_SUCCEEDED.values.cost` remains authoritative.
+## Core And Economy
 
-The tactic first grows to 12 Workers, completes the 3-Vanguard and 4-Ranger
-defense, then resumes Worker expansion. Later growth is staged at populations
-20, 24, 29, and 30 so each dynamic-price band is funded before another spawn.
-Worker prices are 7 at population 20-24 and 8 at 25-29.
+- A Worker occupying the Core production cell moves away before a spawn. If
+  both exits are occupied, the deterministic corridor handoff clears one.
+- Resource cells are observations, not permanent terrain. Workers use stable
+  one-to-one assignments and return loaded cargo to the Core.
+- Production continues during an offensive mission unless survival logic must
+  heal, repair, evacuate, or clear an occupied production cell.
+- The Core remains stationary for ordinary expansion and Beacon pressure. Only
+  verified survival threats start a four-Tick Core migration.
 
-## Core Safety
+## Combat Priorities
 
-- The Core is the highest-value object and is never intentionally self-destructed.
-- Runtime decisions use independent lifecycle, threat, and mission layers.
-  `global_posture` is a diagnostic summary rather than a replacement for the
-  underlying attack, pursuit, recovery, and compatibility facts.
-- With the default `retreat` policy, migration candidates favor directions away from the Beacon and visible threats.
-- Guards are distributed around the Core instead of stacking on its cell or blocking Worker routes.
-- Any observed Vanguard/Ranger movement enters a short alert that recalls missions, pauses expansion production, and reorients defenders. Lateral activity does not move the Core by itself.
-- An approaching enemy whose estimated time to attack range is at most 16 Ticks starts pre-emptive evasion. A confirmed distant pursuit also starts evasion before the normal 12-cell fallback trigger.
-- Recent attack positions remain actionable for exactly six planning Ticks when visibility is lost; event geometry and explicit actor IDs exclude unrelated enemies when possible.
-- Multi-axis breakout minimizes projected damage before comparing the complete sorted enemy-distance vector, so the Core can leave crossfire even when no step increases distance from every enemy.
-- An emergency migration whose destination does not worsen projected damage or aggregate enemy risk is allowed to finish instead of being cancelled for an immediate heal or cargo deposit. A hard-blocked or riskier destination can still cancel.
-- Core and fleet attack memory are separate: a remote Worker taking damage recalls the defense posture but does not by itself move the Core.
-- A compatibility marker forces conservative behavior when published rules, the server contract, or the SDK no longer match the tested profile.
+1. Survive a direct Core threat.
+2. Attack a visible hostile Core.
+3. Attack visible hostile combat units and Workers.
+4. Patrol unexplored or stale perimeter sectors.
+5. Contest the Champion Beacon when the force is mature.
 
-## Economy and Scouting
+Visible enemy Cores are not required to be isolated, stationary, repeatedly
+confirmed, or escort-free before becoming a mission target. A remote escort can
+change local threat posture, but it does not erase the Core target. Rangers use
+legal cell fire; Vanguards sweep adjacent targets or move toward the target.
 
-- Resource cells are treated as dynamic observations, not permanent terrain.
-- Empty Workers and remembered resource cells are paired with deterministic minimum-cost matching. A small intent bonus prevents churn, but a materially closer Worker can take over a target; each resource remains assigned to at most one Worker.
-- Resource routes are released after six non-improving Ticks. Scout routes change direction after three non-improving Ticks, prioritize the least recently observed chunks, and avoid sending every Worker through the same corridor.
-- Loaded Workers prioritize a legal return route and account for Core movement.
-- When a Worker occupies the Core production cell, it moves out before a spawn.
-  If both exits are occupied, the tactic queues a deterministic corridor
-  handoff; a full Core also keeps loaded Workers outside until storage reopens.
-- A loaded Worker may use the second legal slot of a cell occupied by one
-  friendly unit. Core egress uses the same narrow exception, while normal
-  movement still reserves one destination per Tick to prevent uncontrolled
-  stacking.
-- Recovery mode protects the replacement Worker and dropped cargo after a Core loss.
+One Vanguard and one Ranger remain as Core guards. Other combat units join the
+strike group. When there is no visible target, non-guard units follow
+deterministic outward patrol sectors whose radius grows with elapsed Ticks.
 
-## Combat Policy
+## Beacon Campaign
 
-- Active enemy fleets release raids and stationary-clearance targets, pause non-emergency production, then distribute defenders across distinct threat-facing axes around the Core.
-- A detached strike group intercepted by a non-target combat Unit releases its mission, counterattacks when immediately legal, and returns to the Core without forcing a remote Core migration.
-- A remote Scout that evades a combat Unit keeps returning after contact is lost, then observes a short cooldown near the Core before it can resume scouting.
-- A defender with a legal attack during combat pressure counterattacks before generic retreat. Rangers prioritize hostile Rangers, then Vanguards, and continue firing on every legal Tick instead of alternating by Tick parity. This does not authorize a chase.
-- During safe, uncongested windows, one wounded non-assault defender at a time
-  returns to a stationary, healthy Core for healing. The reserve covers the
-  exact missing HP, another same-type guard remains outside, and combat pressure
-  or imminent cargo delivery pauses the return.
-- Confirmed stationary units can be cleared by a small bounded strike group while guards remain with the Core, but only outside combat pressure.
-- A stationary Core is considered for a raid only after repeated observations and isolation checks. The Worker that exposed it may remain as the designated observer. The default strike group can engage from at most 48 path-independent Manhattan cells and releases a target if pulled beyond 56, while one Vanguard and one Ranger remain as Core guards.
-- Under gameplay v0.14, Rangers use target-free cell fire for legal defensive shots so another hostile remaining in the submitted cell can still be hit. A strike Ranger may also fire at the remembered cell of a confirmed stationary Core during a short visibility gap.
-- Loss of visibility does not immediately invalidate stationary-target memory, but moving escorts, contradictory observations, age, and risk reduce confidence.
-- Loot events, storage capacity, same-Tick Core survival, and return-path cost determine whether a kill was economically useful.
+The Beacon campaign starts only when all of these are true:
 
-## Current Optimization Priority
+- population is at least 40;
+- resources are at least 30;
+- the Core has full HP and shield;
+- there is no current Core attack or threatening enemy;
+- more than one Vanguard is available so the guard layer remains intact.
 
-The strategy currently has focused unit tests and structured diagnostics for economy stalls, blocking, Core survival, scouting coverage, combat pressure, lifecycle events, dynamic spawn prices, repeated affordability failures, and unexplained resource loss. New tuning should be driven by a captured unhealthy window rather than by increasing fleet size or adding a model to the Tick loop.
+The selected Vanguard travels to a ground Beacon, picks it up, and returns to
+the Core. The Core itself never moves just to pursue or retreat from a Beacon.
 
-The first hierarchical-controller stage is implemented: every planned Turn now
-records `global_posture`, `threat_level`, and a deterministic `threat_reason`.
-The next stages are a shared two-horizon action-risk evaluator, persistent squad
-missions, visibility-aware cover postures, generated scenario tests, and only
-then shadow evaluation of additional allow-listed parameters.
+## Safety And Recovery
 
-The complete threat states, engagement boundaries, multi-axis breakout scoring,
-visibility assumptions, and offline optimization contract are documented in
-[Threat Response State Machine](threat-response.md).
+Lifecycle, threat, and mission layers remain independent. `RESPAWNING` queues
+no invented actions, `COMPATIBILITY_HOLD` stops offensive production, and
+`RECOVERY` rebuilds locally after a replacement Core. A hard survival threat
+still overrides the aggressive mission plan and starts the existing multi-axis
+evasion logic.
+
+Every accepted Turn can be written to SQLite. The dashboard uses this history
+to replay explored cells, resources, unit trails, events, and historical enemy
+Core sightings without exposing credentials.

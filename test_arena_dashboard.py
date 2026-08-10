@@ -1,0 +1,184 @@
+from __future__ import annotations
+
+import http.client
+import tempfile
+import threading
+import unittest
+from pathlib import Path
+
+from arena_hero import Accepted, CommandPlan, PlayerState, Turn
+
+from arena_dashboard import (
+    DashboardApplication,
+    DashboardServer,
+    LEADERBOARD_KEYS,
+    _validated_leaderboard,
+)
+from arena_history import HistoryRecorder, list_ticks, read_overview
+
+
+CORE_ID = "00000000-0000-4000-8000-000000000001"
+WORKER_ID = "00000000-0000-4000-8000-000000000002"
+ENEMY_CORE_ID = "10000000-0000-4000-8000-000000000001"
+
+
+def make_turn(
+    tick: int = 41,
+    *,
+    enemy_position: tuple[int, int] | None = (4, 0),
+) -> Turn:
+    objects = [
+        {
+            "kind": "CORE",
+            "id": CORE_ID,
+            "controlled": True,
+            "owner_username": "commander",
+            "position": [0, 0],
+            "hp": 5,
+            "shield": 5,
+            "state": "NORMAL",
+        },
+        {
+            "kind": "UNIT",
+            "id": WORKER_ID,
+            "controlled": True,
+            "position": [1, 0],
+            "hp": 2,
+            "unit_type": "WORKER",
+            "cargo": 0,
+        },
+        {"kind": "RESOURCE", "positions": [[2, 0]]},
+        {"kind": "OBSTACLE", "positions": [[0, 2]]},
+    ]
+    if enemy_position is not None:
+        objects.append(
+            {
+                "kind": "CORE",
+                "id": ENEMY_CORE_ID,
+                "controlled": False,
+                "owner_username": "target",
+                "position": list(enemy_position),
+                "hp": 4,
+                "shield": 1,
+                "state": "NORMAL",
+            }
+        )
+    state = PlayerState.model_validate(
+        {
+            "status": "ACTIVE",
+            "respawn_at_tick": None,
+            "resources": 37,
+            "population": 1,
+            "champion_beacon": {"position": [8, 3]},
+            "objects": objects,
+            "events": [],
+        }
+    )
+
+    def submitter(plan: CommandPlan, _key: str | None) -> Accepted:
+        return Accepted(
+            accepted=True,
+            tick=plan.tick,
+            source="AGENT",
+            received_at="2026-08-07T00:00:00Z",
+        )
+
+    return Turn(tick=tick, state=state, submitter=submitter)
+
+
+class HistoryTests(unittest.TestCase):
+    def test_records_and_reads_tactical_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            turn = make_turn()
+            with HistoryRecorder(path) as recorder:
+                recorder.record(turn, strategy={"phase": "EXPANSION"})
+
+            ticks = list_ticks(path)
+            overview = read_overview(path, tick=41)
+
+            self.assertEqual([item["tick"] for item in ticks], [41])
+            self.assertTrue(overview["available"])
+            self.assertEqual(overview["strategy"]["phase"], "EXPANSION")
+            self.assertIn([2, 0, 41, 41], overview["resource_history"])
+            self.assertEqual(
+                overview["enemy_core_history"][0]["core_id"],
+                ENEMY_CORE_ID,
+            )
+            self.assertTrue(
+                overview["enemy_core_history"][0]["currently_visible"]
+            )
+            self.assertEqual(overview["enemy_core_history"][0]["age_ticks"], 0)
+            self.assertIn(WORKER_ID, overview["trails"])
+
+    def test_enemy_core_history_distinguishes_live_and_last_seen_positions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            with HistoryRecorder(path) as recorder:
+                recorder.record(make_turn(41, enemy_position=(4, 0)))
+                recorder.record(make_turn(42, enemy_position=None))
+                recorder.record(make_turn(43, enemy_position=(5, 0)))
+
+            hidden = read_overview(path, tick=42)["enemy_core_history"][0]
+            visible = read_overview(path, tick=43)["enemy_core_history"][0]
+
+            self.assertFalse(hidden["currently_visible"])
+            self.assertEqual(hidden["last_seen_tick"], 41)
+            self.assertEqual(hidden["age_ticks"], 1)
+            self.assertEqual((hidden["x"], hidden["y"]), (4, 0))
+            self.assertTrue(visible["currently_visible"])
+            self.assertEqual(visible["age_ticks"], 0)
+            self.assertEqual((visible["x"], visible["y"]), (5, 0))
+
+    def test_history_limit_removes_old_snapshots_and_core_sightings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            with HistoryRecorder(path, limit=2) as recorder:
+                for tick in (40, 41, 42):
+                    recorder.record(make_turn(tick))
+
+            self.assertEqual([item["tick"] for item in list_ticks(path)], [41, 42])
+            overview = read_overview(path, tick=40)
+            self.assertFalse(overview["available"])
+
+
+class DashboardTests(unittest.TestCase):
+    def test_validates_all_leaderboard_categories(self) -> None:
+        payload = {
+            key: [{"rank": 1, "username": "commander", "score": 0}]
+            for key in LEADERBOARD_KEYS
+        }
+
+        self.assertEqual(_validated_leaderboard(payload), payload)
+        payload["damage_dealt"][0]["score"] = True
+        with self.assertRaisesRegex(ValueError, "damage_dealt"):
+            _validated_leaderboard(payload)
+
+    def test_static_handler_rejects_parent_directory_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            static = root / "dashboard"
+            static.mkdir()
+            (static / "index.html").write_text("ok", encoding="utf-8")
+            (root / "secret.txt").write_text("secret", encoding="utf-8")
+            app = DashboardApplication(
+                history_db=root / "history.sqlite3",
+                static_root=static,
+            )
+            server = DashboardServer(("127.0.0.1", 0), app)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                connection = http.client.HTTPConnection(*server.server_address)
+                connection.request("GET", "/../secret.txt")
+                response = connection.getresponse()
+                response.read()
+                self.assertEqual(response.status, 404)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+
+if __name__ == "__main__":
+    unittest.main()

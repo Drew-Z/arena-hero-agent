@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "arena-hero-agent"
 version = "0.1.0"
-description = "A deterministic, resource-first Arena Hero agent with hierarchical threat response."
+description = "A deterministic aggressive-expansion Arena Hero agent with tactical history dashboard."
 readme = "README.md"
 authors = [{ name = "WuDiWangWaSai" }]
 requires-python = ">=3.11"
@@ -34,6 +34,7 @@ Source = "https://github.com/WuDiWangWaSai/arena-hero-agent"
 
 [project.scripts]
 arena-hero-agent = "arena_farmer:main"
+arena-hero-dashboard = "arena_dashboard:main"
 arena-hero-supervisor = "arena_supervisor:main"
 arena-hero-optimizer = "arena_optimizer:main"
 arena-hero-version-monitor = "arena_version_monitor:main"
@@ -42,8 +43,14 @@ arena-hero-health = "arena_health:main"
 [tool.setuptools]
 py-modules = [
     "arena_farmer",
+    "arena_dashboard",
+    "arena_history",
     "arena_optimizer",
     "arena_supervisor",
     "arena_version_monitor",
     "arena_health",
 ]
+packages = ["dashboard"]
+
+[tool.setuptools.package-data]
+dashboard = ["*.html", "*.css", "*.js"]

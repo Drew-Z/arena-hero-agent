@@ -3,10 +3,11 @@ param(
     [string]$PythonPath,
     [string]$EnvFile = ".env",
     [string]$LogFile = "arena_farmer.log",
-    [ValidateRange(1, 23)]
-    [int]$WorkerTarget = 23,
+    [ValidateRange(1, 18)]
+    [int]$WorkerTarget = 18,
     [ValidateSet("hold", "pursue", "retreat")]
-    [string]$BeaconPolicy = "retreat",
+    [string]$BeaconPolicy = "pursue",
+    [string]$HistoryDb = "arena_history.sqlite3",
     [string]$BaseUrl,
     [switch]$NoCompatibilityMarker
 )
@@ -38,6 +39,7 @@ else {
 $agentPath = Join-Path $projectRoot "arena_farmer.py"
 $envPath = Resolve-ProjectPath $EnvFile
 $logPath = Resolve-ProjectPath $LogFile
+$historyPath = Resolve-ProjectPath $HistoryDb
 
 function Invoke-AgentLogRotation {
     if (-not (Test-Path -LiteralPath $logPath)) {
@@ -106,7 +108,8 @@ $agentArguments = @(
     $agentPath,
     "--env-file", $envPath,
     "--worker-target", $WorkerTarget,
-    "--beacon-policy", $BeaconPolicy
+    "--beacon-policy", $BeaconPolicy,
+    "--history-db", $historyPath
 )
 if (-not [string]::IsNullOrWhiteSpace($BaseUrl)) {
     $agentArguments += @("--base-url", $BaseUrl)

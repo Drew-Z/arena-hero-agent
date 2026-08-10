@@ -1,6 +1,10 @@
 #!/bin/sh
 set -eu
 
+if [ "${1:-}" != "arena-hero-agent" ]; then
+    exec "$@"
+fi
+
 if [ -n "${ARENA_HERO_API_KEY_FILE:-}" ]; then
     if [ ! -r "$ARENA_HERO_API_KEY_FILE" ]; then
         echo "Arena Hero API key secret is not readable." >&2

@@ -5,8 +5,9 @@ SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_ROOT=$(dirname "$SCRIPT_DIR")
 AGENT="$PROJECT_ROOT/.venv/bin/arena-hero-agent"
 ENV_FILE=${ARENA_HERO_ENV_FILE:-$PROJECT_ROOT/.env}
-WORKER_TARGET=${ARENA_WORKER_TARGET:-23}
-BEACON_POLICY=${ARENA_BEACON_POLICY:-retreat}
+WORKER_TARGET=${ARENA_WORKER_TARGET:-18}
+BEACON_POLICY=${ARENA_BEACON_POLICY:-pursue}
+HISTORY_DB=${ARENA_HISTORY_DB:-$PROJECT_ROOT/arena_history.sqlite3}
 RETRY_DELAY=2
 
 if [ ! -x "$AGENT" ]; then
@@ -19,6 +20,7 @@ while :; do
         --env-file "$ENV_FILE" \
         --worker-target "$WORKER_TARGET" \
         --beacon-policy "$BEACON_POLICY" \
+        --history-db "$HISTORY_DB" \
         --no-compatibility-marker \
         "$@"
     EXIT_CODE=$?

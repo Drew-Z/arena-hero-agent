@@ -31,8 +31,8 @@ COOLDOWN_SECONDS = 48 * 60 * 60
 FAILED_CANDIDATE_COOLDOWN_SECONDS = 7 * 24 * 60 * 60
 PROMOTION_THRESHOLD = 1.10
 MAX_REJECT_RATIO = 0.02
-ALLOWED_WORKER_TARGETS = (10, 12, 17, 22, 23)
-LOCKED_BEACON_POLICY = "retreat"
+ALLOWED_WORKER_TARGETS = (12, 15, 18)
+LOCKED_BEACON_POLICY = "pursue"
 
 TICK_RE = re.compile(r"\btick=(\d+)\s+accepted=(\w+)")
 ANY_TICK_RE = re.compile(r"\btick(?:=|\s)(\d+)\b")
@@ -160,10 +160,10 @@ class WindowMetrics:
 @dataclass(slots=True)
 class OptimizerState:
     active: dict[str, object] = field(
-        default_factory=lambda: asdict(Candidate(23))
+        default_factory=lambda: asdict(Candidate(18))
     )
     last_good: dict[str, object] = field(
-        default_factory=lambda: asdict(Candidate(23))
+        default_factory=lambda: asdict(Candidate(18))
     )
     generation: int = 0
     last_observed_tick: int | None = None
@@ -438,7 +438,7 @@ def read_journal(
 
 def read_runtime_config(path: Path) -> Candidate:
     if not path.exists():
-        write_runtime_config(path, Candidate(23), 0)
+        write_runtime_config(path, Candidate(18), 0)
     values: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         name, separator, value = line.partition("=")
@@ -446,7 +446,7 @@ def read_runtime_config(path: Path) -> Candidate:
             values[name] = value.strip()
     return _candidate_from_mapping(
         {
-            "worker_target": int(values.get("ARENA_WORKER_TARGET", "23")),
+            "worker_target": int(values.get("ARENA_WORKER_TARGET", "18")),
             "beacon_policy": values.get("ARENA_BEACON_POLICY", LOCKED_BEACON_POLICY),
         }
     )
