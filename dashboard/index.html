@@ -49,6 +49,7 @@
       <div class="panel-tabs" role="tablist" aria-label="情报视图">
         <button id="events-tab" class="panel-tab active" role="tab" aria-selected="true">事件</button>
         <button id="ranking-tab" class="panel-tab" role="tab" aria-selected="false">排行榜</button>
+        <button id="control-tab" class="panel-tab" role="tab" aria-selected="false">调兵</button>
       </div>
       <section id="events-panel" class="panel-view" role="tabpanel">
         <ol id="event-list" class="event-list"></ol>
@@ -60,6 +61,41 @@
           <button data-ranking="beacon_ticks_held" class="ranking-mode">信标</button>
         </div>
         <ol id="ranking-list" class="ranking-list"></ol>
+      </section>
+      <section id="control-panel" class="panel-view hidden" role="tabpanel">
+        <form id="order-form" class="order-form">
+          <label>兵种
+            <select id="order-unit-type">
+              <option value="WORKER">工兵</option>
+              <option value="VANGUARD">先锋</option>
+              <option value="RANGER">游侠</option>
+            </select>
+          </label>
+          <fieldset class="unit-picker-field">
+            <legend>选择具体单位</legend>
+            <div id="order-unit-list" class="unit-picker"></div>
+          </fieldset>
+          <label>数量
+            <input id="order-count" type="number" min="1" max="64" value="0" readonly>
+          </label>
+          <label>X 坐标
+            <input id="order-x" type="number" step="1" value="-445" required>
+          </label>
+          <label>Y 坐标
+            <input id="order-y" type="number" step="1" value="547" required>
+          </label>
+          <button type="submit">派遣</button>
+          <p id="order-status" class="form-status" aria-live="polite"></p>
+        </form>
+        <div class="control-section">
+          <h3>我的战果</h3>
+          <div id="kill-stats" class="kill-stats"></div>
+          <ol id="kill-list" class="event-list"></ol>
+        </div>
+        <div class="control-section">
+          <h3>调兵记录</h3>
+          <ol id="order-list" class="event-list"></ol>
+        </div>
       </section>
     </aside>
   </main>

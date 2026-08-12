@@ -15,6 +15,12 @@ const ui = {
   live: document.querySelector("#live-tick"),
   events: document.querySelector("#event-list"),
   rankings: document.querySelector("#ranking-list"),
+  killStats: document.querySelector("#kill-stats"),
+  kills: document.querySelector("#kill-list"),
+  orders: document.querySelector("#order-list"),
+  unitList: document.querySelector("#order-unit-list"),
+  orderForm: document.querySelector("#order-form"),
+  orderStatus: document.querySelector("#order-status"),
 };
 
 const colors = {
@@ -36,6 +42,9 @@ const state = {
   selectedIndex: -1,
   overview: null,
   leaderboard: null,
+  kills: null,
+  orders: [],
+  controlUnits: [],
   rankingKey: "damage_dealt",
   live: true,
   playing: false,
@@ -321,6 +330,99 @@ function renderRanking() {
   });
 }
 
+function renderControl() {
+  const stats = state.kills || {};
+  ui.killStats.replaceChildren();
+  [
+    ["单位摧毁参与", stats.unit_participations || 0],
+    ["Core 摧毁参与", stats.core_participations || 0],
+    ["合计", stats.total_participations || 0],
+  ].forEach(([label, value]) => {
+    const item = document.createElement("span");
+    item.textContent = label;
+    const number = document.createElement("strong");
+    number.textContent = value;
+    item.append(number);
+    ui.killStats.append(item);
+  });
+
+  ui.kills.replaceChildren();
+  const recentKills = stats.recent || [];
+  if (!recentKills.length) {
+    const item = document.createElement("li");
+    item.className = "empty-state";
+    item.textContent = "暂无摧毁记录";
+    ui.kills.append(item);
+  } else {
+    recentKills.forEach((kill) => {
+      const item = document.createElement("li");
+      const position = Array.isArray(kill.position) ? ` @ ${kill.position[0]},${kill.position[1]}` : "";
+      item.textContent = `t${kill.tick} ${kill.kind === "CORE" ? "Core" : "单位"}${position}`;
+      ui.kills.append(item);
+    });
+  }
+
+  ui.orders.replaceChildren();
+  if (!state.orders.length) {
+    const item = document.createElement("li");
+    item.className = "empty-state";
+    item.textContent = "暂无调兵记录";
+    ui.orders.append(item);
+  } else {
+    state.orders.forEach((order) => {
+      const item = document.createElement("li");
+      item.className = "order-item";
+      const unitIds = order.unit_ids?.length
+        ? order.unit_ids.map((id) => id.slice(0, 8)).join(", ")
+        : "旧订单未指定单位";
+      const summary = document.createElement("span");
+      summary.textContent = `#${order.id} ${order.unit_type} x${order.unit_count} → (${order.target_x},${order.target_y}) / ${order.status} / ${unitIds}`;
+      item.append(summary);
+      if (order.status === "PENDING") {
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.dataset.cancelOrder = order.id;
+        cancel.textContent = "取消";
+        cancel.title = "取消订单，单位将在下一 Tick 恢复自主策略";
+        item.append(cancel);
+      }
+      ui.orders.append(item);
+    });
+  }
+  renderUnitPicker();
+}
+
+function renderUnitPicker() {
+  const selectedType = document.querySelector("#order-unit-type").value;
+  const selectedIds = new Set(
+    [...ui.unitList.querySelectorAll("input:checked")].map((input) => input.value),
+  );
+  const units = state.controlUnits
+    .filter((unit) => unit.unit_type === selectedType)
+    .sort((left, right) => left.id.localeCompare(right.id));
+  ui.unitList.replaceChildren();
+  if (!units.length) {
+    const empty = document.createElement("span");
+    empty.className = "empty-state";
+    empty.textContent = `当前没有 ${selectedType}`;
+    ui.unitList.append(empty);
+  } else {
+    units.forEach((unit) => {
+      const label = document.createElement("label");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.value = unit.id;
+      checkbox.checked = selectedIds.has(unit.id);
+      const cargo = unit.unit_type === "WORKER" ? ` / 载货 ${unit.cargo}` : "";
+      const text = document.createElement("span");
+      text.textContent = `${unit.id.slice(0, 8)} / (${unit.position[0]},${unit.position[1]}) / HP ${unit.hp}${cargo}`;
+      label.append(checkbox, text);
+      ui.unitList.append(label);
+    });
+  }
+  document.querySelector("#order-count").value = ui.unitList.querySelectorAll("input:checked").length;
+}
+
 async function fetchJson(url) {
   const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
@@ -366,6 +468,24 @@ async function refreshLeaderboard() {
   }
 }
 
+async function refreshControl() {
+  try {
+    const [kills, orders, overview] = await Promise.all([
+      fetchJson("/api/kills"),
+      fetchJson("/api/orders"),
+      fetchJson("/api/overview"),
+    ]);
+    state.kills = kills;
+    state.orders = orders || [];
+    state.controlUnits = (overview.state?.objects || []).filter(
+      (item) => item.kind === "UNIT" && item.controlled === true,
+    );
+    renderControl();
+  } catch (error) {
+    ui.orderStatus.textContent = `调兵接口错误 · ${error.message}`;
+  }
+}
+
 async function selectIndex(index) {
   if (!state.ticks.length) return;
   state.selectedIndex = Math.max(0, Math.min(index, state.ticks.length - 1));
@@ -396,13 +516,12 @@ function togglePlay() {
 }
 
 function setPanel(name) {
-  const events = name === "events";
-  document.querySelector("#events-tab").classList.toggle("active", events);
-  document.querySelector("#ranking-tab").classList.toggle("active", !events);
-  document.querySelector("#events-tab").setAttribute("aria-selected", events);
-  document.querySelector("#ranking-tab").setAttribute("aria-selected", !events);
-  document.querySelector("#events-panel").classList.toggle("hidden", !events);
-  document.querySelector("#ranking-panel").classList.toggle("hidden", events);
+  ["events", "ranking", "control"].forEach((item) => {
+    const active = item === name;
+    document.querySelector(`#${item}-tab`).classList.toggle("active", active);
+    document.querySelector(`#${item}-tab`).setAttribute("aria-selected", active);
+    document.querySelector(`#${item}-panel`).classList.toggle("hidden", !active);
+  });
 }
 
 canvas.addEventListener("pointerdown", (event) => {
@@ -440,14 +559,69 @@ document.querySelector("#zoom-out").addEventListener("click", () => { state.view
 ui.slider.addEventListener("input", () => selectIndex(Number(ui.slider.value)));
 document.querySelector("#events-tab").addEventListener("click", () => setPanel("events"));
 document.querySelector("#ranking-tab").addEventListener("click", () => setPanel("ranking"));
+document.querySelector("#control-tab").addEventListener("click", () => setPanel("control"));
 document.querySelectorAll(".ranking-mode").forEach((button) => button.addEventListener("click", () => {
   state.rankingKey = button.dataset.ranking;
   document.querySelectorAll(".ranking-mode").forEach((item) => item.classList.toggle("active", item === button));
   renderRanking();
 }));
 
+ui.orderForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  ui.orderStatus.textContent = "提交中…";
+  const unitIds = [...ui.unitList.querySelectorAll("input:checked")].map((input) => input.value);
+  if (!unitIds.length) {
+    ui.orderStatus.textContent = "请先选择至少一个具体单位";
+    return;
+  }
+  const payload = {
+    unit_type: document.querySelector("#order-unit-type").value,
+    unit_count: unitIds.length,
+    unit_ids: unitIds,
+    target_x: Number(document.querySelector("#order-x").value),
+    target_y: Number(document.querySelector("#order-y").value),
+  };
+  try {
+    const response = await fetch("/api/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.message || result.error || response.statusText);
+    ui.orderStatus.textContent = `已提交 #${result.id}，将在下个 Tick 调整动作`;
+    await refreshControl();
+  } catch (error) {
+    ui.orderStatus.textContent = `提交失败 · ${error.message}`;
+  }
+});
+
+document.querySelector("#order-unit-type").addEventListener("change", renderUnitPicker);
+ui.unitList.addEventListener("change", () => {
+  document.querySelector("#order-count").value = ui.unitList.querySelectorAll("input:checked").length;
+});
+ui.orders.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-cancel-order]");
+  if (!button) return;
+  button.disabled = true;
+  try {
+    const response = await fetch(`/api/orders/${encodeURIComponent(button.dataset.cancelOrder)}`, {
+      method: "DELETE",
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.message || result.error || response.statusText);
+    ui.orderStatus.textContent = `已取消 #${result.id}，所选单位将在下一 Tick 恢复自主策略`;
+    await refreshControl();
+  } catch (error) {
+    button.disabled = false;
+    ui.orderStatus.textContent = `取消失败 · ${error.message}`;
+  }
+});
+
 new ResizeObserver(resizeCanvas).observe(canvas);
 refreshTicks();
 refreshLeaderboard();
+refreshControl();
 setInterval(refreshTicks, 5000);
 setInterval(refreshLeaderboard, 15000);
+setInterval(refreshControl, 5000);

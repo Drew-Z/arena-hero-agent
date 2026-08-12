@@ -12,7 +12,14 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
-from arena_history import list_ticks, read_overview
+from arena_history import (
+    cancel_unit_order,
+    create_unit_order,
+    list_ticks,
+    list_unit_orders,
+    read_kill_stats,
+    read_overview,
+)
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -136,7 +143,54 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/leaderboard":
             self._send_json(self.server.app.leaderboard())
             return
+        if parsed.path == "/api/orders":
+            self._send_json(list_unit_orders(self.server.app.history_db))
+            return
+        if parsed.path == "/api/kills":
+            self._send_json(read_kill_stats(self.server.app.history_db))
+            return
         self._send_static(parsed.path)
+
+    def do_POST(self) -> None:
+        if urlparse(self.path).path != "/api/orders":
+            self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length < 1 or length > 4096:
+                raise ValueError("request body is too large or empty")
+            payload = json.loads(self.rfile.read(length))
+            if not isinstance(payload, dict):
+                raise ValueError("request body must be an object")
+            order = create_unit_order(
+                self.server.app.history_db,
+                unit_type=payload.get("unit_type", ""),
+                unit_count=payload.get("unit_count", 0),
+                unit_ids=payload.get("unit_ids", []),
+                target=(payload.get("target_x"), payload.get("target_y")),
+            )
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            self._send_json(
+                {"error": "invalid_order", "message": str(exc)},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        self._send_json(order, status=HTTPStatus.CREATED)
+
+    def do_DELETE(self) -> None:
+        parts = urlparse(self.path).path.strip("/").split("/")
+        if len(parts) != 3 or parts[:2] != ["api", "orders"]:
+            self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        try:
+            order = cancel_unit_order(self.server.app.history_db, int(parts[2]))
+        except (ValueError, TypeError) as exc:
+            self._send_json(
+                {"error": "invalid_order", "message": str(exc)},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        self._send_json(order)
 
     def _send_json(
         self,

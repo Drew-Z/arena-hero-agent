@@ -72,7 +72,7 @@ button:focus-visible, input:focus-visible, canvas:focus-visible { outline: 2px s
 #map.dragging { cursor: grabbing; }
 
 .intel-panel { min-width: 0; background: rgba(14, 19, 23, 0.98); border-left: 1px solid var(--border); overflow: hidden; }
-.panel-tabs { height: 44px; display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1px solid var(--border); }
+.panel-tabs { height: 44px; display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid var(--border); }
 .panel-tab { border: 0; border-radius: 0; border-bottom: 2px solid transparent; background: transparent; color: #96a4ad; }
 .panel-tab.active { color: #edf4f7; border-bottom-color: var(--cyan); background: #141a1f; }
 .panel-view { height: calc(100% - 44px); overflow: auto; }
@@ -94,6 +94,27 @@ button:focus-visible, input:focus-visible, canvas:focus-visible { outline: 2px s
 .rank { color: #7f8d96; font-variant-numeric: tabular-nums; }
 .username { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .score { color: #f0c84c; font-variant-numeric: tabular-nums; }
+
+.order-form { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.order-form label { display: grid; gap: 4px; color: #9eabb4; font-size: 11px; }
+.order-form input, .order-form select { width: 100%; min-width: 0; height: 31px; padding: 0 7px; color: #edf4f7; background: #0c1114; border: 1px solid var(--border); border-radius: 2px; }
+.unit-picker-field { grid-column: 1 / -1; min-width: 0; margin: 0; padding: 0; border: 0; }
+.unit-picker-field legend { margin-bottom: 4px; color: #9eabb4; font-size: 11px; }
+.unit-picker { max-height: 170px; overflow: auto; border: 1px solid var(--border); background: #0c1114; }
+.unit-picker label { display: flex; grid-template-columns: none; align-items: center; gap: 7px; min-height: 32px; padding: 5px 7px; border-bottom: 1px solid #20282e; color: #dbe4e9; }
+.unit-picker label:last-child { border-bottom: 0; }
+.unit-picker input { width: 15px; height: 15px; flex: 0 0 auto; }
+.unit-picker span { min-width: 0; overflow-wrap: anywhere; }
+.order-form button { grid-column: 1 / -1; height: 32px; color: #071014; background: var(--cyan); border-color: var(--cyan); font-weight: 700; }
+.form-status { grid-column: 1 / -1; min-height: 16px; margin: 0; color: #9eabb4; font-size: 11px; }
+.control-section { border-bottom: 1px solid var(--border); }
+.control-section h3 { margin: 0; padding: 11px 14px 7px; color: #edf4f7; font-size: 12px; }
+.kill-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 0 14px 10px; }
+.kill-stats span { padding: 8px 5px; text-align: center; color: #9eabb4; background: #0c1114; border: 1px solid var(--border); font-size: 11px; }
+.kill-stats strong { display: block; margin-top: 2px; color: var(--red); font-size: 17px; }
+.order-item { display: flex; align-items: flex-start; gap: 8px; }
+.order-item span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.order-item button { flex: 0 0 auto; padding: 3px 7px; color: #ff9a9e; }
 
 .legend {
   position: absolute;
@@ -152,7 +173,7 @@ button:focus-visible, input:focus-visible, canvas:focus-visible { outline: 2px s
   .metrics span:nth-child(5), .metrics span:nth-child(6) { display: none; }
   .controls { grid-column: 2; grid-row: 1; }
   .controls #tick-slider, .controls #previous-tick, .controls #next-tick, .controls #zoom-out, .controls #zoom-in { display: none; }
-  .workspace { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) 210px; }
+  .workspace { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) 280px; }
   .intel-panel { border-left: 0; border-top: 1px solid var(--border); }
   .legend { grid-template-columns: repeat(2, auto); left: 8px; bottom: 8px; }
   .map-status { right: 8px; bottom: 8px; max-width: 48%; }

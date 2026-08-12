@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import closing
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 
 DEFAULT_HISTORY_LIMIT = 4096
@@ -18,6 +19,10 @@ VISION_RADII = {
 }
 
 Position = tuple[int, int]
+UNIT_ORDER_TYPES = {"WORKER", "VANGUARD", "RANGER"}
+UNIT_ORDER_STATUSES = {"PENDING", "COMPLETED", "CANCELLED"}
+INT64_MIN = -(2**63)
+INT64_MAX = 2**63 - 1
 
 
 def _position(value: object) -> Position | None:
@@ -105,6 +110,46 @@ def _connect(path: Path, *, read_only: bool = False) -> sqlite3.Connection:
     return connection
 
 
+def _ensure_unit_orders_table(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS unit_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at REAL NOT NULL,
+            unit_type TEXT NOT NULL,
+            unit_count INTEGER NOT NULL,
+            unit_ids_json TEXT NOT NULL DEFAULT '[]',
+            target_x INTEGER NOT NULL,
+            target_y INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'PENDING',
+            completed_tick INTEGER,
+            CHECK (unit_type IN ('WORKER', 'VANGUARD', 'RANGER')),
+            CHECK (unit_count BETWEEN 1 AND 64),
+            CHECK (status IN ('PENDING', 'COMPLETED', 'CANCELLED'))
+        );
+        CREATE INDEX IF NOT EXISTS unit_orders_status_idx
+            ON unit_orders (status, id);
+        """
+    )
+    columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(unit_orders)")
+    }
+    if "unit_ids_json" not in columns:
+        connection.execute(
+            "ALTER TABLE unit_orders ADD COLUMN unit_ids_json TEXT NOT NULL DEFAULT '[]'"
+        )
+        connection.execute(
+            "UPDATE unit_orders SET status = 'CANCELLED' WHERE status = 'PENDING'"
+        )
+
+
+def _unit_order_dict(row: sqlite3.Row) -> dict[str, object]:
+    order = dict(row)
+    order["unit_ids"] = json.loads(str(order.pop("unit_ids_json")))
+    return order
+
+
 class HistoryRecorder:
     def __init__(self, path: Path, *, limit: int = DEFAULT_HISTORY_LIMIT) -> None:
         if limit < 1:
@@ -165,6 +210,7 @@ class HistoryRecorder:
                 ON enemy_core_sightings (tick);
             """
         )
+        _ensure_unit_orders_table(self.connection)
 
     def record(
         self,
@@ -283,6 +329,28 @@ class HistoryRecorder:
     def close(self) -> None:
         self.connection.close()
 
+    def active_orders(self, *, limit: int = 64) -> list[dict[str, object]]:
+        safe_limit = max(1, min(limit, 64))
+        rows = self.connection.execute(
+            """
+            SELECT id, created_at, unit_type, unit_count, unit_ids_json,
+                   target_x, target_y, status
+            FROM unit_orders WHERE status = 'PENDING' ORDER BY id LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+        return [_unit_order_dict(row) for row in rows]
+
+    def complete_order(self, order_id: int, *, tick: int) -> None:
+        with self.connection:
+            self.connection.execute(
+                """
+                UPDATE unit_orders SET status = 'COMPLETED', completed_tick = ?
+                WHERE id = ? AND status = 'PENDING'
+                """,
+                (tick, order_id),
+            )
+
     def __enter__(self) -> HistoryRecorder:
         return self
 
@@ -304,6 +372,169 @@ def list_ticks(path: Path, *, limit: int = 512) -> list[dict[str, object]]:
             (safe_limit,),
         ).fetchall()
     return [dict(row) for row in reversed(rows)]
+
+
+def create_unit_order(
+    path: Path,
+    *,
+    unit_type: str,
+    unit_count: int,
+    unit_ids: Sequence[str],
+    target: Position,
+) -> dict[str, object]:
+    normalized_type = str(unit_type).upper()
+    if normalized_type not in UNIT_ORDER_TYPES:
+        raise ValueError("unit_type must be WORKER, VANGUARD, or RANGER")
+    if (
+        isinstance(unit_count, bool)
+        or not isinstance(unit_count, int)
+        or not 1 <= unit_count <= 64
+    ):
+        raise ValueError("unit_count must be between 1 and 64")
+    if isinstance(unit_ids, (str, bytes)) or not isinstance(unit_ids, Sequence):
+        raise ValueError("unit_ids must be a list of Unit UUIDs")
+    try:
+        normalized_ids = [str(UUID(value)) for value in unit_ids]
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("unit_ids must contain valid Unit UUIDs") from exc
+    if len(normalized_ids) != unit_count:
+        raise ValueError("unit_count must match the selected Unit IDs")
+    if len(set(normalized_ids)) != len(normalized_ids):
+        raise ValueError("unit_ids must not contain duplicates")
+    if (
+        not isinstance(target, (tuple, list))
+        or len(target) != 2
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not INT64_MIN <= value <= INT64_MAX
+            for value in target
+        )
+    ):
+        raise ValueError("target coordinates must be signed int64 values")
+    with closing(_connect(path)) as connection:
+        _ensure_unit_orders_table(connection)
+        cursor = connection.execute(
+            """
+            INSERT INTO unit_orders
+                (created_at, unit_type, unit_count, unit_ids_json, target_x, target_y)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                time.time(),
+                normalized_type,
+                unit_count,
+                json.dumps(normalized_ids, separators=(",", ":")),
+                target[0],
+                target[1],
+            ),
+        )
+        order_id = int(cursor.lastrowid)
+        connection.commit()
+    return {
+        "id": order_id,
+        "unit_type": normalized_type,
+        "unit_count": unit_count,
+        "unit_ids": normalized_ids,
+        "target_x": target[0],
+        "target_y": target[1],
+        "status": "PENDING",
+    }
+
+
+def list_unit_orders(path: Path, *, limit: int = 64) -> list[dict[str, object]]:
+    if not path.is_file():
+        return []
+    safe_limit = max(1, min(limit, 64))
+    with closing(_connect(path, read_only=True)) as connection:
+        try:
+            rows = connection.execute(
+                """
+                SELECT id, created_at, unit_type, unit_count, target_x, target_y,
+                       unit_ids_json, status, completed_tick
+                FROM unit_orders ORDER BY id DESC LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+    return [_unit_order_dict(row) for row in rows]
+
+
+def cancel_unit_order(path: Path, order_id: int) -> dict[str, object]:
+    if isinstance(order_id, bool) or not isinstance(order_id, int) or order_id < 1:
+        raise ValueError("order_id must be a positive integer")
+    with closing(_connect(path)) as connection:
+        _ensure_unit_orders_table(connection)
+        row = connection.execute(
+            "SELECT status FROM unit_orders WHERE id = ?",
+            (order_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("unit order was not found")
+        if row["status"] == "PENDING":
+            connection.execute(
+                "UPDATE unit_orders SET status = 'CANCELLED' WHERE id = ?",
+                (order_id,),
+            )
+            connection.commit()
+        result = connection.execute(
+            """
+            SELECT id, created_at, unit_type, unit_count, unit_ids_json,
+                   target_x, target_y, status, completed_tick
+            FROM unit_orders WHERE id = ?
+            """,
+            (order_id,),
+        ).fetchone()
+        assert result is not None
+        return _unit_order_dict(result)
+
+
+def read_kill_stats(path: Path, *, recent_limit: int = 32) -> dict[str, object]:
+    if not path.is_file():
+        return {"available": False, "unit_participations": 0, "core_participations": 0, "recent": []}
+    with closing(_connect(path, read_only=True)) as connection:
+        rows = connection.execute(
+            "SELECT tick, state_json FROM snapshots ORDER BY tick"
+        ).fetchall()
+    seen_events: set[str] = set()
+    unit_participations = 0
+    core_participations = 0
+    recent: list[dict[str, object]] = []
+    for row in rows:
+        state = json.loads(row["state_json"])
+        for event in state.get("events", []):
+            if not isinstance(event, dict):
+                continue
+            if event.get("event_type") != "DESTRUCTION_PARTICIPATION":
+                continue
+            event_id = str(event.get("event_id", ""))
+            if event_id and event_id in seen_events:
+                continue
+            if event_id:
+                seen_events.add(event_id)
+            kind = str(event.get("reason_code", ""))
+            if kind == "UNIT":
+                unit_participations += 1
+            elif kind == "CORE":
+                core_participations += 1
+            else:
+                continue
+            position = _position(event.get("position"))
+            recent.append(
+                {
+                    "tick": int(event.get("tick", row["tick"])),
+                    "kind": kind,
+                    "position": list(position) if position is not None else None,
+                }
+            )
+    return {
+        "available": True,
+        "unit_participations": unit_participations,
+        "core_participations": core_participations,
+        "total_participations": unit_participations + core_participations,
+        "recent": recent[-max(1, min(recent_limit, 128)) :][::-1],
+    }
 
 
 def read_overview(path: Path, *, tick: int | None = None) -> dict[str, object]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import json
 import tempfile
 import threading
 import unittest
@@ -14,7 +15,15 @@ from arena_dashboard import (
     LEADERBOARD_KEYS,
     _validated_leaderboard,
 )
-from arena_history import HistoryRecorder, list_ticks, read_overview
+from arena_history import (
+    HistoryRecorder,
+    cancel_unit_order,
+    create_unit_order,
+    list_ticks,
+    list_unit_orders,
+    read_kill_stats,
+    read_overview,
+)
 
 
 CORE_ID = "00000000-0000-4000-8000-000000000001"
@@ -26,6 +35,7 @@ def make_turn(
     tick: int = 41,
     *,
     enemy_position: tuple[int, int] | None = (4, 0),
+    events: list[dict[str, object]] | None = None,
 ) -> Turn:
     objects = [
         {
@@ -71,7 +81,7 @@ def make_turn(
             "population": 1,
             "champion_beacon": {"position": [8, 3]},
             "objects": objects,
-            "events": [],
+            "events": events or [],
         }
     )
 
@@ -87,6 +97,78 @@ def make_turn(
 
 
 class HistoryTests(unittest.TestCase):
+    def test_unit_orders_are_validated_and_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            order = create_unit_order(
+                path,
+                unit_type="worker",
+                unit_count=1,
+                unit_ids=[WORKER_ID],
+                target=(-445, 547),
+            )
+            self.assertEqual(order["unit_type"], "WORKER")
+            self.assertEqual(order["unit_ids"], [WORKER_ID])
+            self.assertEqual(list_unit_orders(path)[0]["target_x"], -445)
+            with self.assertRaises(ValueError):
+                create_unit_order(
+                    path,
+                    unit_type="WORKER",
+                    unit_count=0,
+                    unit_ids=[],
+                    target=(0, 0),
+                )
+            with self.assertRaisesRegex(ValueError, "must match"):
+                create_unit_order(
+                    path,
+                    unit_type="WORKER",
+                    unit_count=1,
+                    unit_ids=[],
+                    target=(0, 0),
+                )
+
+    def test_pending_order_can_be_cancelled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            order = create_unit_order(
+                path,
+                unit_type="WORKER",
+                unit_count=1,
+                unit_ids=[WORKER_ID],
+                target=(3, 0),
+            )
+            cancelled = cancel_unit_order(path, int(order["id"]))
+            self.assertEqual(cancelled["status"], "CANCELLED")
+            with HistoryRecorder(path) as recorder:
+                self.assertEqual(recorder.active_orders(), [])
+
+    def test_kill_stats_deduplicate_participation_events(self) -> None:
+        events = [
+            {
+                "event_id": "20000000-0000-4000-8000-000000000001",
+                "tick": 41,
+                "event_type": "DESTRUCTION_PARTICIPATION",
+                "reason_code": "UNIT",
+                "position": [3, 0],
+            },
+            {
+                "event_id": "20000000-0000-4000-8000-000000000002",
+                "tick": 41,
+                "event_type": "DESTRUCTION_PARTICIPATION",
+                "reason_code": "CORE",
+                "position": [4, 0],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            with HistoryRecorder(path) as recorder:
+                recorder.record(make_turn(events=events))
+                recorder.record(make_turn(42, enemy_position=None, events=events))
+            stats = read_kill_stats(path)
+            self.assertEqual(stats["unit_participations"], 1)
+            self.assertEqual(stats["core_participations"], 1)
+            self.assertEqual(len(stats["recent"]), 2)
+
     def test_records_and_reads_tactical_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.sqlite3"
@@ -143,6 +225,48 @@ class HistoryTests(unittest.TestCase):
 
 
 class DashboardTests(unittest.TestCase):
+    def test_order_endpoint_accepts_coordinate_command(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            static = root / "dashboard"
+            static.mkdir()
+            (static / "index.html").write_text("ok", encoding="utf-8")
+            app = DashboardApplication(history_db=root / "history.sqlite3", static_root=static)
+            server = DashboardServer(("127.0.0.1", 0), app)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                connection = http.client.HTTPConnection(*server.server_address)
+                body = json.dumps(
+                    {
+                        "unit_type": "WORKER",
+                        "unit_count": 1,
+                        "unit_ids": [WORKER_ID],
+                        "target_x": -445,
+                        "target_y": 547,
+                    }
+                )
+                connection.request(
+                    "POST",
+                    "/api/orders",
+                    body=body,
+                    headers={"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                payload = json.loads(response.read())
+                self.assertEqual(response.status, 201)
+                self.assertEqual(payload["target_y"], 547)
+
+                connection.request("DELETE", f"/api/orders/{payload['id']}")
+                response = connection.getresponse()
+                cancelled = json.loads(response.read())
+                self.assertEqual(response.status, 200)
+                self.assertEqual(cancelled["status"], "CANCELLED")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
     def test_validates_all_leaderboard_categories(self) -> None:
         payload = {
             key: [{"rank": 1, "username": "commander", "score": 0}]

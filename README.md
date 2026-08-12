@@ -40,6 +40,8 @@ Every accepted Turn is stored in a bounded SQLite history. The dashboard provide
 - friendly movement trails and submitted move lines;
 - Tick playback, timeline navigation, pan, and zoom;
 - event feed and public damage, Core-destruction, and Beacon leaderboards.
+- coordinate orders for explicitly selected Worker, Vanguard, or Ranger UUIDs, with cancellation;
+- local unit/Core destruction-participation totals from recorded events.
 
 Start it after the Agent has begun writing `arena_history.sqlite3`:
 
@@ -53,8 +55,7 @@ Open [http://127.0.0.1:8765](http://127.0.0.1:8765). The leaderboard proxy uses 
 
 - Python 3.11 or newer
 - An Arena Hero API key
-- PowerShell on Windows or a POSIX shell on Linux
-- Docker or systemd only for those deployment paths
+- PowerShell on Windows
 
 Runtime dependencies are hash-locked. Credentials and private runtime logs are ignored and must never be committed.
 
@@ -85,53 +86,9 @@ Optional PowerShell overrides use a single dash:
 
 Stop the foreground Agent with `Ctrl+C`. Code changes require an Agent restart.
 
-## Linux
+## Production deployment note
 
-```bash
-git clone https://github.com/WuDiWangWaSai/arena-hero-agent.git
-cd arena-hero-agent
-cp .env.example .env
-# Set ARENA_HERO_API_KEY locally. Never commit .env.
-./scripts/bootstrap.sh
-./scripts/run-agent.sh
-```
-
-Optional runtime overrides:
-
-```bash
-ARENA_WORKER_TARGET=18 ARENA_BEACON_POLICY=pursue ARENA_HISTORY_DB=./arena_history.sqlite3 ./scripts/run-agent.sh
-```
-
-## Docker Compose
-
-Place the API key as the only line in `secrets/arena_hero_api_key.txt`, then run:
-
-```bash
-docker compose up -d --build
-docker compose logs -f agent
-```
-
-Compose starts both the Agent and dashboard, persists history in a named volume, and publishes the dashboard only on `127.0.0.1:8765`. The containers use read-only root filesystems, drop Linux capabilities, and pass the API key only to the Agent through a Docker secret.
-
-## systemd
-
-Install the Agent and compatibility monitor on a supported Linux host:
-
-```bash
-sudo sh scripts/install-systemd.sh
-sudo systemctl status arena-hero-agent.service --no-pager
-sudo journalctl -fu arena-hero-agent.service -o short-iso-precise
-```
-
-History is written to `/var/lib/arena-hero-agent/history.sqlite3`. Production updates must use the transactional updater, then verify the service and deployed commit:
-
-```bash
-sh scripts/update-systemd.sh
-sudo systemctl is-active arena-hero-agent.service
-cat /opt/arena-hero-agent/current/source-commit
-```
-
-See [deployment](docs/deployment.md) for rollback, optional supervisor/optimizer, and uninstall procedures.
+The repository still contains the systemd transaction scripts required by the separately managed production host. They are not part of the supported local Windows workflow and are intentionally left untouched.
 
 ## Verification
 

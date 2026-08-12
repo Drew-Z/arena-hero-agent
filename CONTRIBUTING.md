@@ -27,7 +27,9 @@ python -m pip install --no-deps --no-build-isolation -e .
 python -m unittest discover -v
 ```
 
-On Windows, `scripts/bootstrap.ps1` performs the same setup. On POSIX systems, use `sh scripts/bootstrap.sh`.
+On Windows, `scripts/bootstrap.ps1` performs the setup. The local development
+workflow is Windows-only; the systemd deployment scripts are maintained solely
+for the separately managed production host.
 
 After the preflight succeeds, create a topic branch when contributing through a
 pull request. Keep commits scoped and write commit messages that describe the
@@ -43,9 +45,8 @@ python -m compileall -q arena_farmer.py arena_health.py arena_supervisor.py aren
 python scripts/check_secrets.py
 ```
 
-For deployment changes, also validate `docker build .`, `docker compose config`,
-shell syntax, `python -m unittest -v test_systemd_deploy`, and systemd units on
-Linux.
+For deployment changes, also validate shell syntax, `python -m unittest -v
+test_systemd_deploy`, and the systemd units on the managed production host.
 
 Documentation-only changes may omit the Python test suite when they do not
 change commands or configuration, but must still run the credential scan and

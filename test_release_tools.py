@@ -31,13 +31,6 @@ class ReleaseTagTests(unittest.TestCase):
         self.assertEqual(project_requires, input_requires)
         self.assertLessEqual(input_requires, lock_requires)
 
-    def test_compose_restarts_a_stalled_event_stream(self) -> None:
-        root = Path(__file__).resolve().parent
-        compose = (root / "compose.yaml").read_text(encoding="utf-8")
-
-        self.assertIn("restart: unless-stopped", compose)
-        self.assertIn("- --stale-turn-timeout-seconds\n      - \"150\"", compose)
-
     @staticmethod
     def _read_exact_pins(path: Path) -> set[str]:
         pins = set()

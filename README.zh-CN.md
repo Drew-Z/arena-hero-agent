@@ -40,6 +40,8 @@
 - 己方单位移动轨迹和当前计划移动线；
 - 时间轴、播放、前后 Tick、拖拽和缩放；
 - 事件流，以及伤害、摧毁 Core 参与次数、信标占领时长排行榜。
+- 调兵面板：从当前己方单位中勾选具体 UUID，指定坐标并可取消进行中的订单；
+- 我的战果：按历史事件统计单位/Core 摧毁参与次数。
 
 Agent 开始生成 `arena_history.sqlite3` 后，启动展示页：
 
@@ -53,8 +55,7 @@ Agent 开始生成 `arena_history.sqlite3` 后，启动展示页：
 
 - Python 3.11 或更高版本
 - Arena Hero API Key
-- Windows 使用 PowerShell，Linux 使用 POSIX shell
-- 只有选择对应部署方式时才需要 Docker 或 systemd
+- 本地运行仅支持 Windows PowerShell/CMD
 
 运行依赖已通过哈希锁定。密钥和私有运行日志均不得提交到 Git。
 
@@ -85,53 +86,9 @@ PowerShell 可选参数使用单横线：
 
 前台运行时按 `Ctrl+C` 停止。修改代码后必须重启 Agent 才会生效。
 
-## Linux 运行
+## 生产部署说明
 
-```bash
-git clone https://github.com/WuDiWangWaSai/arena-hero-agent.git
-cd arena-hero-agent
-cp .env.example .env
-# 只在本机填写 ARENA_HERO_API_KEY，不要提交 .env。
-./scripts/bootstrap.sh
-./scripts/run-agent.sh
-```
-
-可选运行参数：
-
-```bash
-ARENA_WORKER_TARGET=18 ARENA_BEACON_POLICY=pursue ARENA_HISTORY_DB=./arena_history.sqlite3 ./scripts/run-agent.sh
-```
-
-## Docker Compose
-
-把 API Key 作为唯一一行写入 `secrets/arena_hero_api_key.txt`，然后运行：
-
-```bash
-docker compose up -d --build
-docker compose logs -f agent
-```
-
-Compose 会同时启动 Agent 和展示页，把历史数据保存在命名卷中，并只在 `127.0.0.1:8765` 发布展示页。容器根文件系统只读、移除 Linux capabilities，API Key 只通过 Docker secret 提供给 Agent。
-
-## systemd 部署
-
-在受支持的 Linux 主机安装 Agent 和兼容性监控：
-
-```bash
-sudo sh scripts/install-systemd.sh
-sudo systemctl status arena-hero-agent.service --no-pager
-sudo journalctl -fu arena-hero-agent.service -o short-iso-precise
-```
-
-历史数据库位于 `/var/lib/arena-hero-agent/history.sqlite3`。生产更新必须使用事务式更新脚本，并核对服务状态和实际部署提交：
-
-```bash
-sh scripts/update-systemd.sh
-sudo systemctl is-active arena-hero-agent.service
-cat /opt/arena-hero-agent/current/source-commit
-```
-
-回滚、可选 Supervisor/Optimizer 和卸载步骤见[部署文档](docs/deployment.md)。
+仓库仍保留由独立生产服务器使用的 systemd 事务更新脚本。它们不属于本机 Windows 运行流程，因此不会在本地启动或验证。
 
 ## 验证
 
