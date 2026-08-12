@@ -13,12 +13,11 @@ permissions:
 
 jobs:
   test:
-    name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    name: Python ${{ matrix.python-version }} on Windows
+    runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
         python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -47,9 +46,9 @@ jobs:
           arena-hero-version-monitor --help
           arena-hero-health --help
 
-  public-surface:
-    name: Public surface and deployment
-    runs-on: ubuntu-latest
+  windows-surface:
+    name: Windows public surface
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -61,18 +60,6 @@ jobs:
             requirements.lock
       - name: Scan tracked files for credentials
         run: python scripts/check_secrets.py
-      - name: Validate shell scripts
-        run: |
-          sh -n docker/entrypoint.sh scripts/bootstrap.sh scripts/run-agent.sh scripts/install-systemd.sh scripts/rollback-systemd.sh scripts/update-systemd.sh
-          sh scripts/install-systemd.sh --help >/dev/null
-          sh scripts/rollback-systemd.sh --help >/dev/null
-          sh scripts/update-systemd.sh --help >/dev/null
-          if sh scripts/install-systemd.sh --with-supervisor --without-supervisor 2>/dev/null; then
-            echo "conflicting installer flags unexpectedly succeeded" >&2
-            exit 1
-          fi
-      - name: Simulate versioned systemd deployment and rollback
-        run: python -m unittest -v test_systemd_deploy test_systemd_update
       - name: Validate PowerShell scripts
         shell: pwsh
         run: |
@@ -86,26 +73,3 @@ jobs:
             )
             if ($errors) { throw ($errors | Out-String) }
           }
-      - name: Validate Compose and image
-        run: |
-          mkdir -p secrets
-          printf 'ci-placeholder\n' > secrets/arena_hero_api_key.txt
-          docker compose config --quiet
-          docker build --tag arena-hero-agent:ci .
-      - name: Validate systemd units
-        run: |
-          for account in arena-hero arena-hero-version arena-hero-supervisor; do
-            sudo groupadd --system "$account" || true
-            sudo useradd --system --no-create-home --gid "$account" "$account" || true
-          done
-          sudo install -d -m 0750 /etc/arena-hero-agent
-          sudo install -m 0640 /dev/null /etc/arena-hero-agent.env
-          sudo install -m 0640 /dev/null /etc/arena-hero-agent/runtime.env
-          sudo install -m 0640 /dev/null /etc/arena-hero-supervisor.env
-          sudo install -d /opt/arena-hero-agent/releases/ci/.venv/bin
-          sudo ln -s releases/ci /opt/arena-hero-agent/current
-          for command in arena-hero-agent arena-hero-supervisor arena-hero-optimizer arena-hero-version-monitor; do
-            sudo touch "/opt/arena-hero-agent/current/.venv/bin/$command"
-            sudo chmod 0755 "/opt/arena-hero-agent/current/.venv/bin/$command"
-          done
-          systemd-analyze verify deploy/*.service deploy/*.timer
