@@ -10,6 +10,8 @@ A deterministic, long-running aggressive tactic for [Arena Hero](https://doc.are
 
 This is a community project, not an official Arena Hero product.
 
+Community acknowledgement: this project recognizes and supports the [LINUX DO community](https://linux.do/).
+
 ## Strategy
 
 The default force grows through three production stages:
@@ -41,7 +43,7 @@ Every accepted Turn is stored in a bounded SQLite history. The dashboard provide
 - Tick playback, timeline navigation, pan, and zoom;
 - event feed and public damage, Core-destruction, and Beacon leaderboards.
 - coordinate orders for explicitly selected Worker, Vanguard, or Ranger UUIDs, with cancellation;
-- local unit/Core destruction-participation totals from recorded events.
+- local unit/Core destruction-participation totals, named enemy Core victories, incoming attacks, losses, and confirmed revenge targets from recorded events.
 
 Start it after the Agent has begun writing `arena_history.sqlite3`:
 
