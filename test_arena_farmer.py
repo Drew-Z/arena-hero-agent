@@ -2427,6 +2427,58 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertTrue(tactic.core_raid_launched)
         self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
 
+    def test_core_raid_keeps_the_same_strike_members_while_rallying(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        target = enemy_core(ENEMY_1, (40, 0))
+        units = [
+            unit(VANGUARD_1, "VANGUARD", (0, 3)),
+            unit(VANGUARD_2, "VANGUARD", (5, 0)),
+            unit(VANGUARD_3, "VANGUARD", (30, 10)),
+            unit(VANGUARD_4, "VANGUARD", (-20, -5)),
+            unit(RANGER_1, "RANGER", (-2, 0)),
+            unit(RANGER_2, "RANGER", (6, 0)),
+            unit(RANGER_3, "RANGER", (31, 10)),
+            unit(RANGER_4, "RANGER", (-19, -5)),
+        ]
+        first = make_turn(tick=100, units=units, enemies=[target])
+        tactic.choose_actions(first)
+        locked = (
+            set(tactic.core_raid_vanguard_ids),
+            set(tactic.core_raid_ranger_ids),
+        )
+
+        moved = [dict(item) for item in units]
+        for item in moved:
+            if item["id"] in {str(value) for value in locked[1]}:
+                item["position"] = [item["position"][0] - 20, item["position"][1]]
+        second = make_turn(tick=101, units=moved, enemies=[target])
+        tactic.choose_actions(second)
+
+        self.assertEqual(tactic._strike_group_ids(second, tactic._select_isolated_core_target(second)), locked)
+
+    def test_core_raid_launches_after_rally_timeout(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        target = enemy_core(ENEMY_1, (40, 0))
+        units = [
+            unit(VANGUARD_1, "VANGUARD", (0, 3)),
+            unit(VANGUARD_2, "VANGUARD", (5, 0)),
+            unit(VANGUARD_3, "VANGUARD", (30, 10)),
+            unit(VANGUARD_4, "VANGUARD", (-20, -5)),
+            unit(RANGER_1, "RANGER", (-2, 0)),
+            unit(RANGER_2, "RANGER", (6, 0)),
+            unit(RANGER_3, "RANGER", (31, 10)),
+            unit(RANGER_4, "RANGER", (-19, -5)),
+        ]
+        tactic.choose_actions(make_turn(tick=100, units=units, enemies=[target]))
+
+        timed_out = make_turn(tick=112, units=units, enemies=[target])
+        tactic.choose_actions(timed_out)
+
+        self.assertTrue(tactic.core_raid_launched)
+        actions = timed_out.plan.model_dump(mode="json", exclude_none=True)["unit_actions"]
+        for unit_id in tactic.core_raid_vanguard_ids | tactic.core_raid_ranger_ids:
+            self.assertNotEqual(actions[str(unit_id)]["type"], "WAIT")
+
     def test_core_target_score_avoids_protected_core_and_keeps_lock(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
         near_core_id = "10000000-0000-4000-8000-000000000100"
@@ -3273,7 +3325,7 @@ class CoreFarmerTests(unittest.TestCase):
 
         guards = _core_guard_ids(turn)
         reserves = _core_reserve_ids(turn)
-        selected = CoreFarmer._strike_group_ids(turn, target)
+        selected = CoreFarmer._select_strike_group_ids(turn, target)
 
         self.assertEqual(tuple(map(len, selected)), (4, 2))
         self.assertTrue(guards[0].isdisjoint(selected[0]))

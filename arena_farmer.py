@@ -91,6 +91,7 @@ ASSAULT_MIN_RANGERS = (
 MAIN_ASSAULT_MIN_VANGUARDS = ASSAULT_MIN_VANGUARDS
 MAIN_ASSAULT_MIN_RANGERS = ASSAULT_MIN_RANGERS
 MAIN_ASSAULT_RALLY_RADIUS = 5
+CORE_RAID_RALLY_TIMEOUT_TICKS = 12
 CORE_TARGET_DURABILITY_WEIGHT = 2
 CORE_TARGET_PROTECTOR_HP_WEIGHT = 3
 ISOLATED_CORE_CONFIRM_TICKS = 2
@@ -1767,6 +1768,9 @@ class CoreFarmer:
         self.isolated_core_target_id: UUID | None = None
         self.core_raid_rally_position: Position | None = None
         self.core_raid_launched = False
+        self.core_raid_started_tick: int | None = None
+        self.core_raid_vanguard_ids: set[UUID] = set()
+        self.core_raid_ranger_ids: set[UUID] = set()
         self.core_observer_candidates: dict[UUID, UUID] = {}
         self.core_observer_target_id: UUID | None = None
         self.core_raid_spotter_id: UUID | None = None
@@ -1824,6 +1828,9 @@ class CoreFarmer:
         self.isolated_core_target_id = None
         self.core_raid_rally_position = None
         self.core_raid_launched = False
+        self.core_raid_started_tick = None
+        self.core_raid_vanguard_ids.clear()
+        self.core_raid_ranger_ids.clear()
         if target_id is not None and forget_position:
             self.stationary_core_memory.pop(target_id, None)
             self.core_observer_candidates.pop(target_id, None)
@@ -2620,6 +2627,13 @@ class CoreFarmer:
         )
         self.isolated_core_target_id = target.id
         vanguard_strike_group, ranger_strike_group = strike_groups(target.position)
+        self.core_raid_vanguard_ids = {
+            unit.id for unit in vanguard_strike_group
+        }
+        self.core_raid_ranger_ids = {
+            unit.id for unit in ranger_strike_group
+        }
+        self.core_raid_started_tick = turn.tick
         self.core_raid_rally_position = _strike_rally_position(
             (*vanguard_strike_group, *ranger_strike_group),
             target.position,
@@ -3713,7 +3727,7 @@ class CoreFarmer:
         )
 
     @staticmethod
-    def _strike_group_ids(
+    def _select_strike_group_ids(
         turn: Turn,
         target: object | None,
     ) -> tuple[set[UUID], set[UUID]]:
@@ -3841,12 +3855,78 @@ class CoreFarmer:
             break
         return selected_vanguards, selected_rangers
 
+    def _refresh_core_raid_group(
+        self,
+        turn: Turn,
+        target: CoreRaidTarget,
+    ) -> None:
+        living_vanguards = {unit.id for unit in turn.vanguards}
+        living_rangers = {unit.id for unit in turn.rangers}
+        self.core_raid_vanguard_ids.intersection_update(living_vanguards)
+        self.core_raid_ranger_ids.intersection_update(living_rangers)
+        selected_vanguards, selected_rangers = self._select_strike_group_ids(
+            turn,
+            target,
+        )
+        needed_vanguards = max(
+            0,
+            len(selected_vanguards) - len(self.core_raid_vanguard_ids),
+        )
+        needed_rangers = max(
+            0,
+            len(selected_rangers) - len(self.core_raid_ranger_ids),
+        )
+        self.core_raid_vanguard_ids.update(
+            sorted(
+                (
+                    unit_id
+                    for unit_id in selected_vanguards
+                    if unit_id not in self.core_raid_vanguard_ids
+                ),
+                key=lambda unit_id: unit_id.bytes,
+            )[:needed_vanguards]
+        )
+        self.core_raid_ranger_ids.update(
+            sorted(
+                (
+                    unit_id
+                    for unit_id in selected_rangers
+                    if unit_id not in self.core_raid_ranger_ids
+                ),
+                key=lambda unit_id: unit_id.bytes,
+            )[:needed_rangers]
+        )
+
+    def _strike_group_ids(
+        self,
+        turn: Turn,
+        target: object | None,
+    ) -> tuple[set[UUID], set[UUID]]:
+        if (
+            isinstance(target, CoreRaidTarget)
+            and target.id == self.isolated_core_target_id
+            and (self.core_raid_vanguard_ids or self.core_raid_ranger_ids)
+        ):
+            return (
+                set(self.core_raid_vanguard_ids),
+                set(self.core_raid_ranger_ids),
+            )
+        return self._select_strike_group_ids(turn, target)
+
     def _refresh_core_raid_launch(
         self,
         turn: Turn,
         target: object | None,
     ) -> bool:
         if not isinstance(target, CoreRaidTarget) or self.core_raid_launched:
+            return True
+        self._refresh_core_raid_group(turn, target)
+        if (
+            self.core_raid_started_tick is not None
+            and turn.tick - self.core_raid_started_tick
+            >= CORE_RAID_RALLY_TIMEOUT_TICKS
+        ):
+            self.core_raid_launched = True
             return True
         mature_fleet = (
             len(turn.vanguards) >= MATURE_GUARD_FLEET_MIN
