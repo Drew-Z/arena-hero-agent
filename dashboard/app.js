@@ -24,6 +24,9 @@ const ui = {
   unitList: document.querySelector("#order-unit-list"),
   orderForm: document.querySelector("#order-form"),
   orderStatus: document.querySelector("#order-status"),
+  pickTarget: document.querySelector("#pick-order-target"),
+  orderX: document.querySelector("#order-x"),
+  orderY: document.querySelector("#order-y"),
 };
 
 const colors = {
@@ -56,6 +59,9 @@ const state = {
   view: { x: 0, y: 0, scale: 9 },
   dragging: false,
   pointer: null,
+  pointerStart: null,
+  pickingTarget: false,
+  orderTarget: null,
 };
 
 function resizeCanvas() {
@@ -72,6 +78,14 @@ function screenPosition(position) {
   return [
     rect.width / 2 + (position[0] - state.view.x) * state.view.scale,
     rect.height / 2 + (position[1] - state.view.y) * state.view.scale,
+  ];
+}
+
+function worldPosition(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  return [
+    Math.round(state.view.x + (clientX - rect.left - rect.width / 2) / state.view.scale),
+    Math.round(state.view.y + (clientY - rect.top - rect.height / 2) / state.view.scale),
   ];
 }
 
@@ -188,6 +202,25 @@ function drawPlan(overview, objectById) {
   }
 }
 
+function drawOrderTarget() {
+  if (!state.orderTarget || !visibleAt(state.orderTarget)) return;
+  const [x, y] = screenPosition(state.orderTarget);
+  const size = Math.max(7, state.view.scale * 0.55);
+  context.save();
+  context.strokeStyle = colors.beacon;
+  context.fillStyle = colors.beacon;
+  context.lineWidth = 2;
+  context.beginPath();
+  context.moveTo(x - size, y);
+  context.lineTo(x + size, y);
+  context.moveTo(x, y - size);
+  context.lineTo(x, y + size);
+  context.stroke();
+  context.font = "11px Segoe UI, Microsoft YaHei, sans-serif";
+  context.fillText(`${state.orderTarget[0]}, ${state.orderTarget[1]}`, x + size + 4, y - 4);
+  context.restore();
+}
+
 function draw() {
   const rect = canvas.getBoundingClientRect();
   context.fillStyle = colors.background;
@@ -236,6 +269,14 @@ function draw() {
     context.closePath();
     context.fill();
   }
+  drawOrderTarget();
+}
+
+function setTargetPicking(active) {
+  state.pickingTarget = active;
+  ui.pickTarget.classList.toggle("active", active);
+  ui.pickTarget.textContent = active ? "点击地图选择目标（可拖动）" : "在地图上选择目标";
+  canvas.classList.toggle("picking-target", active);
 }
 
 function controlledCore() {
@@ -565,6 +606,7 @@ function setPanel(name) {
 canvas.addEventListener("pointerdown", (event) => {
   state.dragging = true;
   state.pointer = [event.clientX, event.clientY];
+  state.pointerStart = [event.clientX, event.clientY];
   canvas.classList.add("dragging");
   canvas.setPointerCapture(event.pointerId);
 });
@@ -576,9 +618,19 @@ canvas.addEventListener("pointermove", (event) => {
   draw();
 });
 canvas.addEventListener("pointerup", (event) => {
+  const moved = state.pointerStart
+    && Math.hypot(event.clientX - state.pointerStart[0], event.clientY - state.pointerStart[1]) > 4;
   state.dragging = false;
+  state.pointerStart = null;
   canvas.classList.remove("dragging");
   canvas.releasePointerCapture(event.pointerId);
+  if (state.pickingTarget && !moved) {
+    state.orderTarget = worldPosition(event.clientX, event.clientY);
+    [ui.orderX.value, ui.orderY.value] = state.orderTarget;
+    ui.orderStatus.textContent = `目标已选择：${state.orderTarget[0]}, ${state.orderTarget[1]}`;
+    setTargetPicking(false);
+    draw();
+  }
 });
 canvas.addEventListener("wheel", (event) => {
   event.preventDefault();
@@ -603,6 +655,12 @@ document.querySelectorAll(".ranking-mode").forEach((button) => button.addEventLi
   document.querySelectorAll(".ranking-mode").forEach((item) => item.classList.toggle("active", item === button));
   renderRanking();
 }));
+ui.pickTarget.addEventListener("click", () => setTargetPicking(!state.pickingTarget));
+[ui.orderX, ui.orderY].forEach((input) => input.addEventListener("change", () => {
+  const position = [Number(ui.orderX.value), Number(ui.orderY.value)];
+  state.orderTarget = position.every(Number.isSafeInteger) ? position : null;
+  draw();
+}));
 
 ui.orderForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -616,8 +674,8 @@ ui.orderForm.addEventListener("submit", async (event) => {
     unit_type: document.querySelector("#order-unit-type").value,
     unit_count: unitIds.length,
     unit_ids: unitIds,
-    target_x: Number(document.querySelector("#order-x").value),
-    target_y: Number(document.querySelector("#order-y").value),
+    target_x: Number(ui.orderX.value),
+    target_y: Number(ui.orderY.value),
   };
   try {
     const response = await fetch("/api/orders", {
@@ -628,6 +686,7 @@ ui.orderForm.addEventListener("submit", async (event) => {
     const result = await response.json();
     if (!response.ok) throw new Error(result.message || result.error || response.statusText);
     ui.orderStatus.textContent = `已提交 #${result.id}，将在下个 Tick 调整动作`;
+    setTargetPicking(false);
     await refreshControl();
   } catch (error) {
     ui.orderStatus.textContent = `提交失败 · ${error.message}`;

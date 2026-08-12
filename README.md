@@ -72,7 +72,7 @@ cd arena-hero-agent
 .\start_agent.ps1
 ```
 
-On first run, the script securely prompts for an API key if neither `.env` nor `ARENA_HERO_API_KEY` provides one. It writes `arena_farmer.log`, records `arena_history.sqlite3`, rotates logs, and retries transient failures.
+On first run, the script securely prompts for an API key if neither `.env` nor `ARENA_HERO_API_KEY` provides one. It writes `arena_farmer.log`, records `arena_history.sqlite3`, starts the dashboard in the same CMD window, opens the browser, rotates logs, and retries transient failures. Use `-NoDashboard` to run only the Agent.
 
 From Command Prompt, use:
 
@@ -86,7 +86,7 @@ Optional PowerShell overrides use a single dash:
 .\start_agent.ps1 -WorkerTarget 18 -BeaconPolicy pursue -HistoryDb .\arena_history.sqlite3
 ```
 
-Stop the foreground Agent with `Ctrl+C`. Code changes require an Agent restart.
+Stop the foreground Agent with `Ctrl+C`; the dashboard process started by it is stopped at the same time. Code changes require an Agent restart.
 
 ## Production deployment note
 

@@ -73,7 +73,7 @@ cd arena-hero-agent
 .\start_agent.ps1
 ```
 
-如果 `.env` 和 `ARENA_HERO_API_KEY` 都没有密钥，脚本第一次运行时会安全提示输入。默认写入 `arena_farmer.log` 和 `arena_history.sqlite3`，自动轮转日志，并重试临时故障。
+如果 `.env` 和 `ARENA_HERO_API_KEY` 都没有密钥，脚本第一次运行时会安全提示输入。默认写入 `arena_farmer.log` 和 `arena_history.sqlite3`，在同一个 CMD 窗口中管理 Agent 和展示页、自动打开浏览器、轮转日志并重试临时故障。如只运行 Agent，可加 `-NoDashboard`。
 
 在 CMD 中使用包装脚本：
 
@@ -87,7 +87,7 @@ PowerShell 可选参数使用单横线：
 .\start_agent.ps1 -WorkerTarget 18 -BeaconPolicy pursue -HistoryDb .\arena_history.sqlite3
 ```
 
-前台运行时按 `Ctrl+C` 停止。修改代码后必须重启 Agent 才会生效。
+前台运行时按 `Ctrl+C` 停止，脚本会同时关闭由它启动的展示页进程。修改代码后必须重启 Agent 才会生效。
 
 ## 生产部署说明
 

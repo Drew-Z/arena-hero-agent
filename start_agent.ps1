@@ -9,6 +9,9 @@ param(
     [string]$BeaconPolicy = "pursue",
     [string]$HistoryDb = "arena_history.sqlite3",
     [string]$BaseUrl,
+    [ValidateRange(1, 65535)]
+    [int]$DashboardPort = 8765,
+    [switch]$NoDashboard,
     [switch]$NoCompatibilityMarker
 )
 
@@ -37,9 +40,13 @@ else {
     $PythonPath = Resolve-ProjectPath $PythonPath
 }
 $agentPath = Join-Path $projectRoot "arena_farmer.py"
+$dashboardPath = Join-Path $projectRoot "arena_dashboard.py"
 $envPath = Resolve-ProjectPath $EnvFile
 $logPath = Resolve-ProjectPath $LogFile
 $historyPath = Resolve-ProjectPath $HistoryDb
+$dashboardUrl = "http://127.0.0.1:$DashboardPort/"
+$dashboardLogPath = Join-Path $projectRoot "arena_dashboard.log"
+$dashboardErrorLogPath = Join-Path $projectRoot "arena_dashboard.error.log"
 
 function Invoke-AgentLogRotation {
     if (-not (Test-Path -LiteralPath $logPath)) {
@@ -118,35 +125,125 @@ if ($NoCompatibilityMarker) {
     $agentArguments += "--no-compatibility-marker"
 }
 
-Set-Location -LiteralPath $projectRoot
-while ($true) {
-    Invoke-AgentLogRotation
-    $runStartedAt = Get-Date
-    $previousErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
+function Test-DashboardReady {
     try {
-        & $PythonPath @agentArguments 2>&1 |
-            ForEach-Object -Process { "$_" } -ErrorAction Stop |
-            Tee-Object -FilePath $logPath -Append -ErrorAction Stop
-        $agentExitCode = $LASTEXITCODE
+        $requestParameters = @{
+            UseBasicParsing = $true
+            Uri = "${dashboardUrl}api/overview"
+            TimeoutSec = 1
+        }
+        $response = Invoke-WebRequest @requestParameters
+        return $response.StatusCode -eq 200
     }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
+    catch {
+        return $false
+    }
+}
+
+function Start-AgentDashboard {
+    if (Test-DashboardReady) {
+        Write-Host "Dashboard already running at $dashboardUrl"
+        return $null
+    }
+    if (Get-NetTCPConnection -LocalPort $DashboardPort -State Listen -ErrorAction SilentlyContinue) {
+        throw "Port $DashboardPort is occupied by another process. Stop it or use -DashboardPort."
     }
 
-    if ($agentExitCode -ne $transientExitCode) {
-        break
-    }
-
-    if (((Get-Date) - $runStartedAt).TotalMinutes -ge 5) {
-        $retryDelaySeconds = 2
-    }
-    Write-Warning "Transient Agent failure. Restarting in $retryDelaySeconds seconds."
-    Start-Sleep -Seconds $retryDelaySeconds
-    $retryDelaySeconds = [Math]::Min(
-        $maximumRetryDelaySeconds,
-        $retryDelaySeconds * 2
+    $arguments = @(
+        ('"{0}"' -f $dashboardPath),
+        "--history-db", ('"{0}"' -f $historyPath),
+        "--host", "127.0.0.1",
+        "--port", $DashboardPort
     )
+    $startParameters = @{
+        FilePath = $PythonPath
+        ArgumentList = $arguments
+        WorkingDirectory = $projectRoot
+        WindowStyle = "Hidden"
+        RedirectStandardOutput = $dashboardLogPath
+        RedirectStandardError = $dashboardErrorLogPath
+        PassThru = $true
+    }
+    $process = Start-Process @startParameters
+
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        if ($process.HasExited) {
+            throw "Dashboard stopped during startup. See $dashboardErrorLogPath"
+        }
+        if (Test-DashboardReady) {
+            Write-Host "Dashboard running at $dashboardUrl"
+            return $process
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    throw "Dashboard did not become ready. See $dashboardErrorLogPath"
+}
+
+Set-Location -LiteralPath $projectRoot
+$stateDirectory = Join-Path $projectRoot "state"
+[IO.Directory]::CreateDirectory($stateDirectory) | Out-Null
+$lockPath = Join-Path $stateDirectory "windows-agent.lock"
+try {
+    $instanceLock = [IO.File]::Open(
+        $lockPath,
+        [IO.FileMode]::OpenOrCreate,
+        [IO.FileAccess]::ReadWrite,
+        [IO.FileShare]::None
+    )
+}
+catch [IO.IOException] {
+    Write-Host "Arena Hero Agent is already running. Use the existing CMD window."
+    exit 2
+}
+$dashboardProcess = $null
+try {
+    if (-not $NoDashboard) {
+        $dashboardProcess = Start-AgentDashboard
+        try {
+            Start-Process $dashboardUrl
+        }
+        catch {
+            Write-Warning "Dashboard is running, but the browser could not be opened: $_"
+        }
+    }
+
+    while ($true) {
+        Invoke-AgentLogRotation
+        $runStartedAt = Get-Date
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            & $PythonPath @agentArguments 2>&1 |
+                ForEach-Object -Process { "$_" } -ErrorAction Stop |
+                Tee-Object -FilePath $logPath -Append -ErrorAction Stop
+            $agentExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+
+        if ($agentExitCode -ne $transientExitCode) {
+            break
+        }
+
+        if (((Get-Date) - $runStartedAt).TotalMinutes -ge 5) {
+            $retryDelaySeconds = 2
+        }
+        Write-Warning "Transient Agent failure. Restarting in $retryDelaySeconds seconds."
+        Start-Sleep -Seconds $retryDelaySeconds
+        $retryDelaySeconds = [Math]::Min(
+            $maximumRetryDelaySeconds,
+            $retryDelaySeconds * 2
+        )
+    }
+}
+finally {
+    if ($null -ne $dashboardProcess -and -not $dashboardProcess.HasExited) {
+        Stop-Process -Id $dashboardProcess.Id -Force -ErrorAction SilentlyContinue
+        $dashboardProcess.WaitForExit()
+    }
+    $instanceLock.Dispose()
 }
 
 Write-Host "Agent stopped with exit code $agentExitCode."

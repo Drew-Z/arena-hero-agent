@@ -106,6 +106,9 @@ button:focus-visible, input:focus-visible, canvas:focus-visible { outline: 2px s
 .unit-picker input { width: 15px; height: 15px; flex: 0 0 auto; }
 .unit-picker span { min-width: 0; overflow-wrap: anywhere; }
 .order-form button { grid-column: 1 / -1; height: 32px; color: #071014; background: var(--cyan); border-color: var(--cyan); font-weight: 700; }
+.order-form .target-picker-button { color: #dce7ec; background: #1a2329; border-color: #42515c; }
+.order-form .target-picker-button.active { color: #071014; background: var(--gold); border-color: var(--gold); }
+#map.picking-target { cursor: crosshair; }
 .form-status { grid-column: 1 / -1; min-height: 16px; margin: 0; color: #9eabb4; font-size: 11px; }
 .control-section { border-bottom: 1px solid var(--border); }
 .control-section h3 { margin: 0; padding: 11px 14px 7px; color: #edf4f7; font-size: 12px; }
