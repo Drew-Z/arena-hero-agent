@@ -132,13 +132,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
             values = parse_qs(parsed.query)
             try:
                 tick = int(values["tick"][0]) if "tick" in values else None
+                since_tick = (
+                    int(values["since_tick"][0]) if "since_tick" in values else None
+                )
             except ValueError:
                 self._send_json(
-                    {"error": "tick_must_be_an_integer"},
+                    {"error": "tick_parameters_must_be_integers"},
                     status=HTTPStatus.BAD_REQUEST,
                 )
                 return
-            self._send_json(read_overview(self.server.app.history_db, tick=tick))
+            include_history = values.get("history", ["1"])[0] != "0"
+            self._send_json(
+                read_overview(
+                    self.server.app.history_db,
+                    tick=tick,
+                    since_tick=since_tick,
+                    include_history=include_history,
+                )
+            )
             return
         if parsed.path == "/api/leaderboard":
             self._send_json(self.server.app.leaderboard())

@@ -2,6 +2,8 @@
 
 const canvas = document.querySelector("#map");
 const context = canvas.getContext("2d", { alpha: false });
+const MAP_CHUNK_SIZE = 32;
+const MAP_LAYERS = ["explored", "obstacles", "resource_history"];
 const ui = {
   tick: document.querySelector("#metric-tick"),
   resources: document.querySelector("#metric-resources"),
@@ -62,11 +64,16 @@ const state = {
   pointerStart: null,
   pickingTarget: false,
   orderTarget: null,
+  viewport: { width: 1, height: 1 },
+  mapIndex: Object.fromEntries(MAP_LAYERS.map((name) => [name, new Map()])),
 };
+
+let drawFrame = 0;
 
 function resizeCanvas() {
   const ratio = Math.max(1, window.devicePixelRatio || 1);
   const rect = canvas.getBoundingClientRect();
+  state.viewport = { width: rect.width, height: rect.height };
   canvas.width = Math.max(1, Math.round(rect.width * ratio));
   canvas.height = Math.max(1, Math.round(rect.height * ratio));
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
@@ -74,10 +81,9 @@ function resizeCanvas() {
 }
 
 function screenPosition(position) {
-  const rect = canvas.getBoundingClientRect();
   return [
-    rect.width / 2 + (position[0] - state.view.x) * state.view.scale,
-    rect.height / 2 + (position[1] - state.view.y) * state.view.scale,
+    state.viewport.width / 2 + (position[0] - state.view.x) * state.view.scale,
+    state.viewport.height / 2 + (position[1] - state.view.y) * state.view.scale,
   ];
 }
 
@@ -91,9 +97,42 @@ function worldPosition(clientX, clientY) {
 
 function visibleAt(position) {
   const [x, y] = screenPosition(position);
-  const rect = canvas.getBoundingClientRect();
   const margin = state.view.scale * 2;
-  return x >= -margin && y >= -margin && x <= rect.width + margin && y <= rect.height + margin;
+  return x >= -margin && y >= -margin
+    && x <= state.viewport.width + margin && y <= state.viewport.height + margin;
+}
+
+function indexCells(name, cells, reset = false) {
+  const index = state.mapIndex[name];
+  if (reset) index.clear();
+  cells.forEach((cell) => {
+    const key = `${Math.floor(cell[0] / MAP_CHUNK_SIZE)},${Math.floor(cell[1] / MAP_CHUNK_SIZE)}`;
+    if (!index.has(key)) index.set(key, []);
+    index.get(key).push(cell);
+  });
+}
+
+function drawIndexedCells(name, color, size = 1) {
+  const halfWidth = state.viewport.width / state.view.scale / 2 + 2;
+  const halfHeight = state.viewport.height / state.view.scale / 2 + 2;
+  const left = Math.floor((state.view.x - halfWidth) / MAP_CHUNK_SIZE);
+  const right = Math.floor((state.view.x + halfWidth) / MAP_CHUNK_SIZE);
+  const top = Math.floor((state.view.y - halfHeight) / MAP_CHUNK_SIZE);
+  const bottom = Math.floor((state.view.y + halfHeight) / MAP_CHUNK_SIZE);
+  for (let chunkX = left; chunkX <= right; chunkX += 1) {
+    for (let chunkY = top; chunkY <= bottom; chunkY += 1) {
+      (state.mapIndex[name].get(`${chunkX},${chunkY}`) || [])
+        .forEach((cell) => drawCell(cell, color, size));
+    }
+  }
+}
+
+function scheduleDraw() {
+  if (drawFrame) return;
+  drawFrame = requestAnimationFrame(() => {
+    drawFrame = 0;
+    draw();
+  });
 }
 
 function drawCell(position, color, size = 1) {
@@ -106,7 +145,7 @@ function drawCell(position, color, size = 1) {
 
 function drawGrid() {
   if (state.view.scale < 7) return;
-  const rect = canvas.getBoundingClientRect();
+  const rect = state.viewport;
   const left = Math.floor(state.view.x - rect.width / state.view.scale / 2);
   const right = Math.ceil(state.view.x + rect.width / state.view.scale / 2);
   const top = Math.floor(state.view.y - rect.height / state.view.scale / 2);
@@ -222,7 +261,7 @@ function drawOrderTarget() {
 }
 
 function draw() {
-  const rect = canvas.getBoundingClientRect();
+  const rect = state.viewport;
   context.fillStyle = colors.background;
   context.fillRect(0, 0, rect.width, rect.height);
   drawGrid();
@@ -235,9 +274,9 @@ function draw() {
     context.textAlign = "start";
     return;
   }
-  overview.explored.forEach(([x, y]) => drawCell([x, y], colors.explored));
-  overview.obstacles.forEach(([x, y]) => drawCell([x, y], colors.obstacle, 0.72));
-  overview.resource_history.forEach(([x, y]) => drawCell([x, y], colors.resourceHistory, 0.34));
+  drawIndexedCells("explored", colors.explored);
+  drawIndexedCells("obstacles", colors.obstacle, 0.72);
+  drawIndexedCells("resource_history", colors.resourceHistory, 0.34);
   Object.values(overview.trails || {}).forEach(drawTrail);
 
   const objects = overview.state.objects || [];
@@ -509,8 +548,21 @@ async function fetchJson(url) {
 }
 
 async function loadOverview(tick = null) {
-  const query = tick === null ? "" : `?tick=${encodeURIComponent(tick)}`;
-  state.overview = await fetchJson(`/api/overview${query}`);
+  const incremental = tick === null && state.live && state.overview?.available;
+  const query = tick !== null
+    ? `?tick=${encodeURIComponent(tick)}`
+    : incremental ? `?since_tick=${encodeURIComponent(state.overview.tick)}` : "";
+  const overview = await fetchJson(`/api/overview${query}`);
+  if (overview.history_delta && state.overview?.available) {
+    for (const name of MAP_LAYERS) {
+      indexCells(name, overview[name]);
+      state.overview[name].push(...overview[name]);
+      overview[name] = state.overview[name];
+    }
+  } else {
+    for (const name of MAP_LAYERS) indexCells(name, overview[name] || [], true);
+  }
+  state.overview = overview;
   if (state.overview.available) {
     centerMap(false);
     updateMetrics();
@@ -552,7 +604,7 @@ async function refreshControl() {
     const [kills, orders, overview] = await Promise.all([
       fetchJson("/api/kills"),
       fetchJson("/api/orders"),
-      fetchJson("/api/overview"),
+      fetchJson("/api/overview?history=0"),
     ]);
     state.kills = kills;
     state.orders = orders || [];
@@ -615,7 +667,7 @@ canvas.addEventListener("pointermove", (event) => {
   state.view.x -= (event.clientX - state.pointer[0]) / state.view.scale;
   state.view.y -= (event.clientY - state.pointer[1]) / state.view.scale;
   state.pointer = [event.clientX, event.clientY];
-  draw();
+  scheduleDraw();
 });
 canvas.addEventListener("pointerup", (event) => {
   const moved = state.pointerStart
@@ -636,7 +688,7 @@ canvas.addEventListener("wheel", (event) => {
   event.preventDefault();
   state.view.scale = Math.max(1.5, Math.min(32, state.view.scale * (event.deltaY < 0 ? 1.14 : 0.88)));
   updateMetrics();
-  draw();
+  scheduleDraw();
 }, { passive: false });
 
 document.querySelector("#previous-tick").addEventListener("click", () => selectIndex(state.selectedIndex - 1));

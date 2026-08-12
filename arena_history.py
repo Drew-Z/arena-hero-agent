@@ -751,7 +751,13 @@ def revenge_usernames(path: Path) -> frozenset[str]:
             return frozenset()
 
 
-def read_overview(path: Path, *, tick: int | None = None) -> dict[str, object]:
+def read_overview(
+    path: Path,
+    *,
+    tick: int | None = None,
+    since_tick: int | None = None,
+    include_history: bool = True,
+) -> dict[str, object]:
     if not path.is_file():
         return {"available": False, "ticks": []}
     with closing(_connect(path, read_only=True)) as connection:
@@ -767,24 +773,40 @@ def read_overview(path: Path, *, tick: int | None = None) -> dict[str, object]:
         if row is None:
             return {"available": False, "ticks": []}
         selected_tick = int(row["tick"])
-        explored = connection.execute(
-            """
-            SELECT x, y, first_seen_tick, last_seen_tick FROM explored_cells
-            WHERE first_seen_tick <= ?
-            """,
-            (selected_tick,),
-        ).fetchall()
-        obstacles = connection.execute(
-            "SELECT x, y FROM obstacle_cells WHERE first_seen_tick <= ?",
-            (selected_tick,),
-        ).fetchall()
-        resources = connection.execute(
-            """
-            SELECT x, y, first_seen_tick, last_seen_tick FROM resource_cells
-            WHERE first_seen_tick <= ?
-            """,
-            (selected_tick,),
-        ).fetchall()
+        history_start = max(0, since_tick or 0)
+        explored = (
+            connection.execute(
+                """
+                SELECT x, y, first_seen_tick, last_seen_tick FROM explored_cells
+                WHERE first_seen_tick <= ? AND first_seen_tick > ?
+                """,
+                (selected_tick, history_start),
+            ).fetchall()
+            if include_history
+            else []
+        )
+        obstacles = (
+            connection.execute(
+                """
+                SELECT x, y FROM obstacle_cells
+                WHERE first_seen_tick <= ? AND first_seen_tick > ?
+                """,
+                (selected_tick, history_start),
+            ).fetchall()
+            if include_history
+            else []
+        )
+        resources = (
+            connection.execute(
+                """
+                SELECT x, y, first_seen_tick, last_seen_tick FROM resource_cells
+                WHERE first_seen_tick <= ? AND first_seen_tick > ?
+                """,
+                (selected_tick, history_start),
+            ).fetchall()
+            if include_history
+            else []
+        )
         enemy_cores = connection.execute(
             """
             SELECT sighting.* FROM enemy_core_sightings AS sighting
@@ -837,6 +859,7 @@ def read_overview(path: Path, *, tick: int | None = None) -> dict[str, object]:
     return {
         "available": True,
         "tick": selected_tick,
+        "history_delta": since_tick is not None,
         "captured_at": row["captured_at"],
         "state": state,
         "plan": json.loads(row["plan_json"]),

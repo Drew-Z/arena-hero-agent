@@ -273,6 +273,23 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(visible["age_ticks"], 0)
             self.assertEqual((visible["x"], visible["y"]), (5, 0))
 
+    def test_overview_can_return_only_new_map_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            with HistoryRecorder(path) as recorder:
+                recorder.record(make_turn(41))
+                recorder.record(make_turn(42))
+
+            delta = read_overview(path, since_tick=41)
+            state_only = read_overview(path, include_history=False)
+
+            self.assertTrue(delta["history_delta"])
+            self.assertEqual(delta["explored"], [])
+            self.assertEqual(delta["obstacles"], [])
+            self.assertEqual(delta["resource_history"], [])
+            self.assertEqual(state_only["state"]["resources"], 37)
+            self.assertEqual(state_only["explored"], [])
+
     def test_history_limit_removes_old_snapshots_and_core_sightings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.sqlite3"
