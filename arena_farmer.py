@@ -1779,6 +1779,7 @@ class CoreFarmer:
         self.threat_caution_until_tick = 0
         self.startup_tick: int | None = None
         self.manual_order_ids: tuple[int, ...] = ()
+        self.revenge_usernames: set[str] = set()
 
     @property
     def recovery_mode(self) -> bool:
@@ -2610,6 +2611,8 @@ class CoreFarmer:
                 continue
             candidates.append(
                 (
+                    str(getattr(enemy_core, "owner_username", "")).casefold()
+                    not in self.revenge_usernames,
                     _core_target_score(turn, enemy_core, strike_distance),
                     enemy_core,
                 )
@@ -2617,7 +2620,7 @@ class CoreFarmer:
 
         if not candidates:
             return None
-        target = min(candidates, key=lambda candidate: candidate[0])[1]
+        target = min(candidates, key=lambda candidate: candidate[:2])[2]
         sighting = self.enemy_core_sightings.get(target.id)
         self.stationary_core_memory[target.id] = EnemyCoreSighting(
             position=target.position,
@@ -5726,6 +5729,9 @@ def play(
                         _reconcile_resource_turn(resource_ledger_snapshot, turn)
                     )
                 active_orders = history.active_orders() if history is not None else ()
+                tactic.revenge_usernames = (
+                    set(history.revenge_usernames()) if history is not None else set()
+                )
                 tactic.choose_actions(turn)
                 completed_orders = tactic.apply_unit_orders(turn, active_orders)
                 try:

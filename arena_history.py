@@ -144,6 +144,149 @@ def _ensure_unit_orders_table(connection: sqlite3.Connection) -> None:
         )
 
 
+def _ensure_combat_records_table(connection: sqlite3.Connection) -> bool:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS combat_records (
+            event_id TEXT NOT NULL,
+            tick INTEGER NOT NULL,
+            direction TEXT NOT NULL,
+            target_kind TEXT NOT NULL,
+            outcome TEXT NOT NULL DEFAULT 'DESTROYED',
+            username TEXT NOT NULL DEFAULT '',
+            x INTEGER,
+            y INTEGER,
+            PRIMARY KEY (event_id, direction, username),
+            CHECK (direction IN ('DEALT', 'SUFFERED')),
+            CHECK (target_kind IN ('UNIT', 'CORE')),
+            CHECK (outcome IN ('DAMAGED', 'DESTROYED'))
+        );
+        CREATE INDEX IF NOT EXISTS combat_records_tick_idx
+            ON combat_records (tick);
+        CREATE INDEX IF NOT EXISTS combat_records_username_idx
+            ON combat_records (username, direction, target_kind);
+        """
+    )
+    columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(combat_records)")
+    }
+    if "outcome" not in columns:
+        connection.execute(
+            "ALTER TABLE combat_records ADD COLUMN outcome TEXT NOT NULL DEFAULT 'DESTROYED'"
+        )
+        return True
+    return False
+
+
+def _enemy_core_username(
+    connection: sqlite3.Connection,
+    core_id: object,
+    tick: int,
+) -> str:
+    if not core_id:
+        return ""
+    row = connection.execute(
+        """
+        SELECT owner_username FROM enemy_core_sightings
+        WHERE core_id = ? AND tick <= ? ORDER BY tick DESC LIMIT 1
+        """,
+        (str(core_id), tick),
+    ).fetchone()
+    return str(row["owner_username"]) if row is not None else ""
+
+
+def _record_combat_events(
+    connection: sqlite3.Connection,
+    state: Mapping[str, Any],
+    snapshot_tick: int,
+) -> None:
+    for event in state.get("events", []):
+        if not isinstance(event, dict) or not event.get("event_id"):
+            continue
+        event_id = str(event["event_id"])
+        event_tick = int(event.get("tick", snapshot_tick))
+        event_type = str(event.get("event_type", ""))
+        values = event.get("values")
+        values = values if isinstance(values, dict) else {}
+        position = _position(event.get("position"))
+        coordinates = position if position is not None else (None, None)
+        records: list[tuple[str, str, str, str]] = []
+        if event_type == "DESTRUCTION_PARTICIPATION":
+            target_kind = str(event.get("reason_code", ""))
+            if target_kind in {"UNIT", "CORE"}:
+                username = (
+                    _enemy_core_username(
+                        connection,
+                        event.get("target_id"),
+                        snapshot_tick,
+                    )
+                    if target_kind == "CORE"
+                    else ""
+                )
+                records.append(("DEALT", target_kind, "DESTROYED", username))
+        elif event_type == "UNIT_DAMAGED":
+            outcome = "DESTROYED" if values.get("hp") == 0 else "DAMAGED"
+            records.append(("SUFFERED", "UNIT", outcome, ""))
+        elif event_type == "CORE_DAMAGED":
+            records.append(("SUFFERED", "CORE", "DAMAGED", ""))
+        elif event_type == "CORE_DESTROYED" and event.get("reason_code") == "ATTACK":
+            attackers = values.get("destroyed_by")
+            usernames = (
+                [str(username) for username in attackers if str(username).strip()]
+                if isinstance(attackers, list)
+                else []
+            )
+            records.extend(
+                ("SUFFERED", "CORE", "DESTROYED", username)
+                for username in (usernames or [""])
+            )
+        for direction, target_kind, outcome, username in records:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO combat_records
+                    (event_id, tick, direction, target_kind, outcome, username, x, y)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    event_tick,
+                    direction,
+                    target_kind,
+                    outcome,
+                    username,
+                    coordinates[0],
+                    coordinates[1],
+                ),
+            )
+
+
+def _backfill_combat_records(connection: sqlite3.Connection) -> None:
+    for row in connection.execute(
+        "SELECT tick, state_json FROM snapshots ORDER BY tick"
+    ):
+        _record_combat_events(connection, json.loads(row["state_json"]), int(row["tick"]))
+
+
+def _revenge_scores(connection: sqlite3.Connection) -> dict[str, int]:
+    scores: dict[str, int] = {}
+    for row in connection.execute(
+        """
+        SELECT username, direction, target_kind, COUNT(*) AS total
+        FROM combat_records WHERE username != ''
+        GROUP BY username, direction, target_kind
+        """
+    ):
+        username = str(row["username"])
+        delta = int(row["total"])
+        if row["direction"] == "DEALT" and row["target_kind"] == "CORE":
+            delta = -delta
+        elif row["direction"] != "SUFFERED":
+            continue
+        scores[username] = scores.get(username, 0) + delta
+    return {username: score for username, score in scores.items() if score > 0}
+
+
 def _unit_order_dict(row: sqlite3.Row) -> dict[str, object]:
     order = dict(row)
     order["unit_ids"] = json.loads(str(order.pop("unit_ids_json")))
@@ -211,6 +354,14 @@ class HistoryRecorder:
             """
         )
         _ensure_unit_orders_table(self.connection)
+        combat_schema_upgraded = _ensure_combat_records_table(self.connection)
+        combat_records_empty = (
+            self.connection.execute("SELECT 1 FROM combat_records LIMIT 1").fetchone()
+            is None
+        )
+        if combat_schema_upgraded or combat_records_empty:
+            with self.connection:
+                _backfill_combat_records(self.connection)
 
     def record(
         self,
@@ -296,6 +447,7 @@ class HistoryRecorder:
                         str(item.get("state", "UNKNOWN")),
                     ),
                 )
+            _record_combat_events(self.connection, state, tick)
             cutoff = self.connection.execute(
                 "SELECT tick FROM snapshots ORDER BY tick DESC LIMIT 1 OFFSET ?",
                 (self.limit - 1,),
@@ -340,6 +492,9 @@ class HistoryRecorder:
             (safe_limit,),
         ).fetchall()
         return [_unit_order_dict(row) for row in rows]
+
+    def revenge_usernames(self) -> frozenset[str]:
+        return frozenset(username.casefold() for username in _revenge_scores(self.connection))
 
     def complete_order(self, order_id: int, *, tick: int) -> None:
         with self.connection:
@@ -492,49 +647,108 @@ def cancel_unit_order(path: Path, order_id: int) -> dict[str, object]:
 
 def read_kill_stats(path: Path, *, recent_limit: int = 32) -> dict[str, object]:
     if not path.is_file():
-        return {"available": False, "unit_participations": 0, "core_participations": 0, "recent": []}
+        return {
+            "available": False,
+            "unit_participations": 0,
+            "core_participations": 0,
+            "recent": [],
+            "losses": [],
+            "revenge_targets": [],
+        }
     with closing(_connect(path, read_only=True)) as connection:
-        rows = connection.execute(
-            "SELECT tick, state_json FROM snapshots ORDER BY tick"
-        ).fetchall()
-    seen_events: set[str] = set()
-    unit_participations = 0
-    core_participations = 0
-    recent: list[dict[str, object]] = []
-    for row in rows:
-        state = json.loads(row["state_json"])
-        for event in state.get("events", []):
-            if not isinstance(event, dict):
-                continue
-            if event.get("event_type") != "DESTRUCTION_PARTICIPATION":
-                continue
-            event_id = str(event.get("event_id", ""))
-            if event_id and event_id in seen_events:
-                continue
-            if event_id:
-                seen_events.add(event_id)
-            kind = str(event.get("reason_code", ""))
-            if kind == "UNIT":
-                unit_participations += 1
-            elif kind == "CORE":
-                core_participations += 1
-            else:
-                continue
-            position = _position(event.get("position"))
-            recent.append(
-                {
-                    "tick": int(event.get("tick", row["tick"])),
-                    "kind": kind,
-                    "position": list(position) if position is not None else None,
-                }
-            )
+        try:
+            rows = connection.execute(
+                """
+                SELECT event_id, tick, direction, target_kind, outcome, username, x, y
+                FROM combat_records ORDER BY tick DESC, event_id DESC
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return {
+                "available": True,
+                "unit_participations": 0,
+                "core_participations": 0,
+                "total_participations": 0,
+                "recent": [],
+                "losses": [],
+                "revenge_targets": [],
+            }
+    dealt = [row for row in rows if row["direction"] == "DEALT"]
+    suffered = [row for row in rows if row["direction"] == "SUFFERED"]
+    unit_participations = sum(row["target_kind"] == "UNIT" for row in dealt)
+    core_participations = sum(row["target_kind"] == "CORE" for row in dealt)
+
+    def record_dict(row: sqlite3.Row) -> dict[str, object]:
+        return {
+            "tick": int(row["tick"]),
+            "kind": str(row["target_kind"]),
+            "outcome": str(row["outcome"]),
+            "username": str(row["username"]) or None,
+            "position": (
+                [int(row["x"]), int(row["y"])]
+                if row["x"] is not None and row["y"] is not None
+                else None
+            ),
+        }
+
+    revenge_counts: dict[str, int] = {}
+    for row in suffered:
+        username = str(row["username"])
+        if username:
+            revenge_counts[username] = revenge_counts.get(username, 0) + 1
+    for row in dealt:
+        username = str(row["username"])
+        if username and row["target_kind"] == "CORE":
+            revenge_counts[username] = revenge_counts.get(username, 0) - 1
     return {
         "available": True,
         "unit_participations": unit_participations,
         "core_participations": core_participations,
         "total_participations": unit_participations + core_participations,
-        "recent": recent[-max(1, min(recent_limit, 128)) :][::-1],
+        "attacks_received": len({str(row["event_id"]) for row in suffered}),
+        "units_lost": len(
+            {
+                str(row["event_id"])
+                for row in suffered
+                if row["target_kind"] == "UNIT" and row["outcome"] == "DESTROYED"
+            }
+        ),
+        "cores_lost": len(
+            {
+                str(row["event_id"])
+                for row in suffered
+                if row["target_kind"] == "CORE" and row["outcome"] == "DESTROYED"
+            }
+        ),
+        "recent": [record_dict(row) for row in dealt[: max(1, min(recent_limit, 128))]],
+        "losses": [
+            record_dict(row)
+            for row in suffered
+            if row["outcome"] == "DESTROYED"
+        ][: max(1, min(recent_limit, 128))],
+        "attacks": [
+            record_dict(row) for row in suffered[: max(1, min(recent_limit, 128))]
+        ],
+        "revenge_targets": [
+            {"username": username, "score": score}
+            for username, score in sorted(
+                revenge_counts.items(), key=lambda item: (-item[1], item[0])
+            )
+            if score > 0
+        ],
     }
+
+
+def revenge_usernames(path: Path) -> frozenset[str]:
+    if not path.is_file():
+        return frozenset()
+    with closing(_connect(path, read_only=True)) as connection:
+        try:
+            return frozenset(
+                username.casefold() for username in _revenge_scores(connection)
+            )
+        except sqlite3.OperationalError:
+            return frozenset()
 
 
 def read_overview(path: Path, *, tick: int | None = None) -> dict[str, object]:

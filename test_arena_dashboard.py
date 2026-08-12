@@ -169,6 +169,67 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(stats["core_participations"], 1)
             self.assertEqual(len(stats["recent"]), 2)
 
+    def test_combat_history_records_usernames_losses_and_revenge(self) -> None:
+        events = [
+            {
+                "event_id": "20000000-0000-4000-8000-000000000010",
+                "tick": 41,
+                "event_type": "DESTRUCTION_PARTICIPATION",
+                "reason_code": "CORE",
+                "target_id": ENEMY_CORE_ID,
+                "position": [4, 0],
+            },
+            {
+                "event_id": "20000000-0000-4000-8000-000000000011",
+                "tick": 41,
+                "event_type": "UNIT_DAMAGED",
+                "reason_code": "ATTACK",
+                "target_id": WORKER_ID,
+                "position": [1, 0],
+                "values": {"damage": 2, "hp": 0},
+            },
+            {
+                "event_id": "20000000-0000-4000-8000-000000000012",
+                "tick": 41,
+                "event_type": "CORE_DESTROYED",
+                "reason_code": "ATTACK",
+                "target_id": CORE_ID,
+                "position": [0, 0],
+                "values": {"destroyed_by": ["rival", "other_rival"]},
+            },
+            {
+                "event_id": "20000000-0000-4000-8000-000000000013",
+                "tick": 41,
+                "event_type": "UNIT_DAMAGED",
+                "reason_code": "ATTACK",
+                "target_id": WORKER_ID,
+                "position": [1, 0],
+                "values": {"damage": 1, "hp": 1},
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            with HistoryRecorder(path) as recorder:
+                recorder.record(make_turn(events=events))
+                self.assertEqual(
+                    recorder.revenge_usernames(),
+                    frozenset({"rival", "other_rival"}),
+                )
+            stats = read_kill_stats(path)
+            self.assertEqual(stats["recent"][0]["username"], "target")
+            self.assertEqual(stats["units_lost"], 1)
+            self.assertEqual(stats["cores_lost"], 1)
+            self.assertEqual(stats["attacks_received"], 3)
+            self.assertEqual(stats["attacks"][0]["outcome"], "DAMAGED")
+            self.assertTrue(any(loss["username"] is None for loss in stats["losses"]))
+            self.assertEqual(
+                stats["revenge_targets"],
+                [
+                    {"username": "other_rival", "score": 1},
+                    {"username": "rival", "score": 1},
+                ],
+            )
+
     def test_records_and_reads_tactical_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.sqlite3"

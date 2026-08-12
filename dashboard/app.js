@@ -15,8 +15,11 @@ const ui = {
   live: document.querySelector("#live-tick"),
   events: document.querySelector("#event-list"),
   rankings: document.querySelector("#ranking-list"),
+  killHeading: document.querySelector("#kill-heading"),
   killStats: document.querySelector("#kill-stats"),
   kills: document.querySelector("#kill-list"),
+  losses: document.querySelector("#loss-list"),
+  revenge: document.querySelector("#revenge-list"),
   orders: document.querySelector("#order-list"),
   unitList: document.querySelector("#order-unit-list"),
   orderForm: document.querySelector("#order-form"),
@@ -332,11 +335,16 @@ function renderRanking() {
 
 function renderControl() {
   const stats = state.kills || {};
+  const username = ownUsername();
+  ui.killHeading.textContent = username ? `我的战果 @${username}` : "我的战果";
   ui.killStats.replaceChildren();
   [
     ["单位摧毁参与", stats.unit_participations || 0],
     ["Core 摧毁参与", stats.core_participations || 0],
     ["合计", stats.total_participations || 0],
+    ["遭受攻击", stats.attacks_received || 0],
+    ["单位阵亡", stats.units_lost || 0],
+    ["Core 阵亡", stats.cores_lost || 0],
   ].forEach(([label, value]) => {
     const item = document.createElement("span");
     item.textContent = label;
@@ -357,10 +365,40 @@ function renderControl() {
     recentKills.forEach((kill) => {
       const item = document.createElement("li");
       const position = Array.isArray(kill.position) ? ` @ ${kill.position[0]},${kill.position[1]}` : "";
-      item.textContent = `t${kill.tick} ${kill.kind === "CORE" ? "Core" : "单位"}${position}`;
+      const username = kill.username ? ` @${kill.username}` : "";
+      item.textContent = `t${kill.tick} ${kill.kind === "CORE" ? "Core" : "单位"}${username}${position}`;
       ui.kills.append(item);
     });
   }
+
+  ui.losses.replaceChildren();
+  const attacks = stats.attacks || [];
+  (attacks.length ? attacks : [{ empty: true }]).forEach((loss) => {
+    const item = document.createElement("li");
+    if (loss.empty) {
+      item.className = "empty-state";
+      item.textContent = "暂无受击记录";
+    } else {
+      const position = Array.isArray(loss.position) ? ` @ ${loss.position[0]},${loss.position[1]}` : "";
+      const result = loss.outcome === "DESTROYED" ? "摧毁" : "攻击";
+      const attacker = loss.username ? `被 @${loss.username} ${result}` : `${result}者身份未公开`;
+      item.textContent = `t${loss.tick} ${loss.kind === "CORE" ? "Core" : "单位"} ${attacker}${position}`;
+    }
+    ui.losses.append(item);
+  });
+
+  ui.revenge.replaceChildren();
+  const revengeTargets = stats.revenge_targets || [];
+  (revengeTargets.length ? revengeTargets : [{ empty: true }]).forEach((target) => {
+    const item = document.createElement("li");
+    if (target.empty) {
+      item.className = "empty-state";
+      item.textContent = "暂无可确认仇敌";
+    } else {
+      item.textContent = `@${target.username} · 仇恨 ${target.score}`;
+    }
+    ui.revenge.append(item);
+  });
 
   ui.orders.replaceChildren();
   if (!state.orders.length) {

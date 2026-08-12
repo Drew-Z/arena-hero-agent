@@ -2524,6 +2524,27 @@ class CoreFarmerTests(unittest.TestCase):
         tactic.choose_actions(unlocked_competitor)
         self.assertEqual(tactic.isolated_core_target_id, UUID(far_core_id))
 
+    def test_revenge_core_is_preferred_when_both_targets_are_attackable(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        tactic.revenge_usernames = {"rival"}
+        near_core = enemy_core(ENEMY_1, (10, 0))
+        far_core = enemy_core(ENEMY_2, (20, 0))
+        near_core["owner_username"] = "stranger"
+        far_core["owner_username"] = "rival"
+        tactic.choose_actions(
+            make_turn(
+                tick=100,
+                units=[
+                    unit(VANGUARD_1, "VANGUARD", (0, 3)),
+                    unit(VANGUARD_2, "VANGUARD", (1, 0)),
+                    unit(RANGER_1, "RANGER", (-2, 0)),
+                    unit(RANGER_2, "RANGER", (2, 0)),
+                ],
+                enemies=[near_core, far_core],
+            )
+        )
+        self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_2))
+
     def test_minimum_defense_fleet_raids_exposed_core_and_keeps_guards(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
         defenders = [
