@@ -733,6 +733,112 @@ class CoreFarmerTests(unittest.TestCase):
         )
         self.assertEqual(tactic.active_core_move_reason, "MANUAL_ORDER")
 
+    def test_dashboard_core_order_clears_congested_departure_lane(self) -> None:
+        blockers = [
+            unit(WORKER_1, "WORKER", (0, -1), cargo=1),
+            unit(WORKER_2, "WORKER", (0, -1), cargo=1),
+            unit(WORKER_3, "WORKER", (0, 1), cargo=1),
+            unit(WORKER_4, "WORKER", (0, 1), cargo=1),
+            unit(WORKER_5, "WORKER", (-1, 0), cargo=1),
+            unit(WORKER_6, "WORKER", (-1, 0), cargo=1),
+        ]
+        turn = make_turn(units=blockers, obstacles=[(1, 0)])
+        tactic = CoreFarmer(worker_target=6, beacon_policy="hold")
+        tactic.choose_actions(turn)
+
+        tactic.apply_unit_orders(
+            turn,
+            [
+                {
+                    "id": 12,
+                    "unit_type": "CORE",
+                    "unit_count": 1,
+                    "unit_ids": [CORE_ID],
+                    "target_x": 0,
+                    "target_y": 20,
+                }
+            ],
+        )
+
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+        self.assertEqual(
+            queued["core_action"],
+            {"type": "START_MOVE", "direction": "DOWN"},
+        )
+        down_blockers = {
+            WORKER_3,
+            WORKER_4,
+        }
+        self.assertTrue(
+            any(
+                queued["unit_actions"][identifier]["type"] == "MOVE"
+                for identifier in down_blockers
+            )
+        )
+        self.assertEqual(tactic.active_core_move_reason, "MANUAL_ORDER")
+
+    def test_alliance_rally_clears_congestion_despite_waiting_cargo(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            shared = Path(directory)
+            peer_units = [
+                unit(
+                    f"30000000-0000-4000-8000-{index:012d}",
+                    "WORKER",
+                    (20 + index, 20),
+                    cargo=0,
+                )
+                for index in range(7)
+            ]
+            AllianceCoordinator(
+                shared,
+                alliance_id="duo",
+                account_id="account-2",
+                expected_members=2,
+                barrier_timeout_seconds=0,
+            ).publish(
+                make_turn(
+                    tick=100,
+                    core_identifier=ALLY_CORE_ID,
+                    owner_username="ally",
+                    core_position=(0, 30),
+                    units=peer_units,
+                )
+            )
+            blockers = [
+                unit(WORKER_1, "WORKER", (0, -1), cargo=1),
+                unit(WORKER_2, "WORKER", (0, -1), cargo=1),
+                unit(WORKER_3, "WORKER", (0, 1), cargo=1),
+                unit(WORKER_4, "WORKER", (0, 1), cargo=1),
+                unit(WORKER_5, "WORKER", (-1, 0), cargo=1),
+                unit(WORKER_6, "WORKER", (-1, 0), cargo=1),
+            ]
+            turn = make_turn(
+                tick=100,
+                units=blockers,
+                obstacles=[(1, 0)],
+            )
+            tactic = CoreFarmer(
+                worker_target=6,
+                beacon_policy="hold",
+                alliance_coordinator=AllianceCoordinator(
+                    shared,
+                    alliance_id="duo",
+                    account_id="account-1",
+                    expected_members=2,
+                    barrier_timeout_seconds=0,
+                ),
+            )
+
+            tactic.choose_actions(turn)
+
+            queued = turn.plan.model_dump(mode="json", exclude_none=True)
+            self.assertEqual(queued["core_action"]["type"], "START_MOVE")
+            self.assertIn(
+                queued["core_action"]["direction"],
+                {"UP", "DOWN", "LEFT"},
+            )
+            self.assertEqual(tactic.active_core_move_reason, "ALLY_RALLY")
+
     def test_allied_cells_block_manual_unit_and_core_orders(self) -> None:
         turn = make_turn(units=[unit(WORKER_1, "WORKER", (0, 0), cargo=0)])
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")

@@ -4015,6 +4015,25 @@ class CoreFarmer:
                     blocked,
                     target_radius=MANUAL_ORDER_ARRIVAL_RADIUS,
                 )
+                if (
+                    core.view.state is CoreState.NORMAL
+                    and not directions
+                    and self._clear_core_departure_lane(
+                        turn,
+                        context,
+                        target,
+                        target_radius=MANUAL_ORDER_ARRIVAL_RADIUS,
+                    )
+                ):
+                    blocked = self._core_blocked_cells(turn, context) | set(
+                        context.danger_cells
+                    )
+                    directions = _path_directions(
+                        core.position,
+                        target,
+                        blocked,
+                        target_radius=MANUAL_ORDER_ARRIVAL_RADIUS,
+                    )
                 if core.view.state is CoreState.MOVING:
                     expected_destination = (
                         _destination(core.position, directions[0])
@@ -5392,6 +5411,21 @@ class CoreFarmer:
             blocked,
             target_radius=ALLY_CORE_RALLY_RADIUS,
         )
+        if not directions and self._clear_core_departure_lane(
+            turn,
+            context,
+            target,
+            target_radius=ALLY_CORE_RALLY_RADIUS,
+        ):
+            blocked = self._core_blocked_cells(turn, context) | set(
+                context.danger_cells
+            )
+            directions = _path_directions(
+                core.position,
+                target,
+                blocked,
+                target_radius=ALLY_CORE_RALLY_RADIUS,
+            )
         if not directions:
             return False
         direction = directions[0]
@@ -5402,6 +5436,75 @@ class CoreFarmer:
         self.last_retreat_direction = direction
         self.active_core_move_reason = "ALLY_RALLY"
         return True
+
+    def _clear_core_departure_lane(
+        self,
+        turn: Turn,
+        context: MovementContext,
+        target: Position,
+        *,
+        target_radius: int,
+    ) -> bool:
+        """Move friendly units out of the first viable Core route cell."""
+        core = turn.core
+        if core is None or core.view.state is not CoreState.NORMAL:
+            return False
+        fixed_blocked = (
+            set(context.obstacles)
+            | set(context.enemy_cells)
+            | set(context.danger_cells)
+            | set(context.allied_cells)
+            | set(turn.resource_cells)
+        )
+        directions = _path_directions(
+            core.position,
+            target,
+            fixed_blocked,
+            target_radius=target_radius,
+        )
+        if not directions:
+            return False
+        lane = _destination(core.position, directions[0])
+        excess = max(0, context.friendly_counts[lane] - 1)
+        if excess == 0:
+            return False
+        core_neighbors = {
+            _destination(core.position, direction)
+            for direction in CARDINAL_DIRECTIONS
+        }
+        occupants = sorted(
+            (unit for unit in turn.units if unit.position == lane),
+            key=lambda unit: (
+                0 if getattr(unit, "unit_type", None) is UnitType.WORKER else 1,
+                int(getattr(unit, "cargo", 0) > 0),
+                _uuid_sort_key(unit),
+            ),
+        )
+        for unit in occupants:
+            escape_directions = tuple(
+                sorted(
+                    CARDINAL_DIRECTIONS,
+                    key=lambda direction: (
+                        _destination(unit.position, direction) in core_neighbors,
+                        context.friendly_counts[
+                            _destination(unit.position, direction)
+                        ],
+                        -_distance(
+                            _destination(unit.position, direction),
+                            core.position,
+                        ),
+                        CARDINAL_DIRECTIONS.index(direction),
+                    ),
+                )
+            )
+            if not _queue_move(unit, escape_directions, context):
+                continue
+            if getattr(unit, "unit_type", None) is UnitType.WORKER:
+                self._set_worker_mode(unit, "CORE_LANE_CLEAR", target)
+            excess -= 1
+            if excess == 0:
+                return True
+        return False
 
     def _moving_core_should_cancel(
         self,
@@ -5748,6 +5851,10 @@ class CoreFarmer:
             projected_hp_damage > 0 and core_survival_margin > 0
         )
         cargo_waiting = self._should_wait_for_cargo(turn, context)
+        cargo_on_core = any(
+            worker.cargo > 0 and worker.position == core.position
+            for worker in turn.workers
+        )
         if (
             turn.resources >= 1
             and core_survival_margin > 0
@@ -5808,7 +5915,7 @@ class CoreFarmer:
             and core.shield >= 5
             and not retreat_enemies
             and not self.combat_pressure_active
-            and not cargo_waiting
+            and not cargo_on_core
             and self._start_alliance_rally(
                 turn,
                 context,
