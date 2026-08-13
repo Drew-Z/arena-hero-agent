@@ -110,6 +110,68 @@ function showHoverTooltip(x, y) {
   ui.hoverTooltip.classList.remove("hidden");
 }
 
+function selectUnitInForm(unit, isMultiSelect = false) {
+  const typeSelect = document.querySelector("#order-unit-type");
+  const unitType = unit.kind === "CORE" ? "CORE" : unit.unit_type;
+
+  // 如果点击了不同兵种，自动切换列表
+  if (typeSelect.value !== unitType) {
+    typeSelect.value = unitType;
+    renderUnitPicker();
+  }
+
+  const checkbox = ui.unitList.querySelector(`input[value="${unit.id}"]`);
+
+  if (isMultiSelect) {
+    // 多选模式：累加当前单位的勾选状态
+    if (checkbox) {
+      checkbox.checked = !checkbox.checked;
+    }
+  } else {
+    // 单选模式：取消其他勾选，只保留当前这 1 个单位
+    ui.unitList.querySelectorAll("input:checked").forEach((cb) => {
+      if (cb !== checkbox) cb.checked = false;
+    });
+    if (checkbox) checkbox.checked = true;
+  }
+
+  // 统计已选中的单位总数
+  const checkedBoxes = ui.unitList.querySelectorAll("input:checked");
+  document.querySelector("#order-count").value = checkedBoxes.length;
+
+  setPanel("control");
+  setTargetPicking(true, "order");
+
+  if (checkedBoxes.length > 0) {
+    ui.orderStatus.textContent = `已选中 ${checkedBoxes.length} 个 ${unitType}（按住 Ctrl 可继续多选），请点击地图标记目的地`;
+  } else {
+    ui.orderStatus.textContent = "未选中任何单位，请点击选择单位";
+  }
+}
+function drawSelectedUnitsHighlight() {
+  if (!state.pickingTarget) return;
+  const checkedIds = new Set(
+    [...ui.unitList.querySelectorAll("input:checked")].map((input) => input.value)
+  );
+  if (!checkedIds.size) return;
+
+  const objects = state.overview?.state?.objects || [];
+  context.save();
+  context.strokeStyle = colors.beacon; // 黄金色高亮
+  context.lineWidth = 2;
+  context.setLineDash([4, 4]);
+
+  for (const item of objects) {
+    if (checkedIds.has(item.id) && item.position) {
+      const [x, y] = screenPosition(item.position);
+      const radius = Math.max(8, state.view.scale * 0.6);
+      context.beginPath();
+      context.arc(x, y, radius, 0, Math.PI * 2);
+      context.stroke();
+    }
+  }
+  context.restore();
+}
 function resizeCanvas() {
   const ratio = Math.max(1, window.devicePixelRatio || 1);
   const rect = canvas.getBoundingClientRect();
@@ -392,6 +454,7 @@ function draw() {
     context.fill();
   }
   drawOrderTarget();
+  drawSelectedUnitsHighlight();
 }
 
 function setTargetPicking(active, mode = "order") {
@@ -822,18 +885,44 @@ canvas.addEventListener("pointerup", (event) => {
   state.pointerStart = null;
   canvas.classList.remove("dragging");
   canvas.releasePointerCapture(event.pointerId);
-  if (state.pickingTarget && !moved) {
-    state.orderTarget = worldPosition(event.clientX, event.clientY);
-    if (state.pickMode === "expedition") {
-      document.querySelector("#expedition-x").value = state.orderTarget[0];
-      document.querySelector("#expedition-y").value = state.orderTarget[1];
-      ui.expeditionStatus.textContent = `目标已选择：${state.orderTarget[0]}, ${state.orderTarget[1]}`;
-    } else {
-      [ui.orderX.value, ui.orderY.value] = state.orderTarget;
-      ui.orderStatus.textContent = `目标已选择：${state.orderTarget[0]}, ${state.orderTarget[1]}`;
+   if (!moved) {
+    const worldPos = worldPosition(event.clientX, event.clientY);
+    // 判断是否按下了 Ctrl (Windows/Linux) 或 Cmd (Mac) 键
+    const isCtrlPressed = event.ctrlKey || event.metaKey;
+
+    // 检查点击位置是否有己方单位/核心
+    const objects = state.overview?.state?.objects || [];
+    const clickedUnit = objects.find((item) =>
+      item.controlled &&
+      ["UNIT", "CORE"].includes(item.kind) &&
+      Math.hypot(item.position[0] - worldPos[0], item.position[1] - worldPos[1]) <= 1.2
+    );
+
+    // 1. 优先处理点击单位：进入单选或 Ctrl 多选模式
+    if (clickedUnit) {
+      selectUnitInForm(clickedUnit, isCtrlPressed);
+      draw();
+      return;
     }
-    setTargetPicking(false);
-    draw();
+
+    // 2. 如果点击了空白地图：设置目的地并提交派遣（集体发送所有选中单位）
+    if (state.pickingTarget) {
+      state.orderTarget = worldPos;
+      if (state.pickMode === "expedition") {
+        document.querySelector("#expedition-x").value = worldPos[0];
+        document.querySelector("#expedition-y").value = worldPos[1];
+        ui.expeditionStatus.textContent = `目标已选择：${worldPos[0]}, ${worldPos[1]}`;
+        setTargetPicking(false);
+      } else {
+        [ui.orderX.value, ui.orderY.value] = state.orderTarget;
+        setTargetPicking(false);
+
+        // 提交表单（会自动打包所有勾选的单位 ID）
+        ui.orderForm.requestSubmit();
+      }
+      draw();
+      return;
+    }
   }
 });
 canvas.addEventListener("wheel", (event) => {
