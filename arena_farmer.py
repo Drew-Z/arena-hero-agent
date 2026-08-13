@@ -1949,6 +1949,7 @@ class CoreFarmer:
         self.production_weights: dict[UnitType, int] | None = None
         self.expedition_members: dict[int, set[UUID]] = {}
         self.revenge_usernames: set[str] = set()
+        self.manual_core_order_active = False
 
     def _refresh_alliance(self, turn: Turn) -> None:
         coordinator = self.alliance_coordinator
@@ -3722,7 +3723,13 @@ class CoreFarmer:
             combat_target,
             retreat_enemies,
         )
-        reserve_core_for_spawn = spawn_reservation is not None
+        alliance_rally_target = self._alliance_rally_target(turn)
+        migration_delivery_pause = self._migration_delivery_pause(turn) and (
+            self.manual_core_order_active or alliance_rally_target is not None
+        )
+        reserve_core_for_spawn = (
+            spawn_reservation is not None and not migration_delivery_pause
+        )
         raid_launched = self._refresh_core_raid_launch(
             turn,
             isolated_core_target,
@@ -6548,6 +6555,10 @@ def play(
                     }
                     if isinstance(production, Mapping)
                     else None
+                )
+                tactic.manual_core_order_active = any(
+                    str(order.get("unit_type")) == "CORE"
+                    for order in active_orders
                 )
                 tactic.revenge_usernames = (
                     set(history.revenge_usernames()) if history is not None else set()

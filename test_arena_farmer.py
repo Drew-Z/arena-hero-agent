@@ -811,6 +811,42 @@ class CoreFarmerTests(unittest.TestCase):
             {"type": "START_MOVE", "direction": "RIGHT"},
         )
 
+    def test_migration_delivery_window_does_not_reserve_core_for_spawn(self) -> None:
+        cargo_workers = [
+            unit(WORKER_1, "WORKER", (1, 0), cargo=1),
+            unit(WORKER_2, "WORKER", (4, 0), cargo=1),
+            unit(WORKER_3, "WORKER", (5, 0), cargo=1),
+            unit(WORKER_4, "WORKER", (6, 0), cargo=1),
+            unit(WORKER_5, "WORKER", (7, 0), cargo=1),
+            unit(WORKER_6, "WORKER", (8, 0), cargo=1),
+        ]
+        tactic = CoreFarmer(worker_target=18, beacon_policy="hold")
+        tactic.manual_core_order_active = True
+        tactic.last_core_move_tick = 100
+        turn = make_turn(tick=103, resources=20, units=cargo_workers)
+
+        tactic.choose_actions(turn)
+        tactic.apply_unit_orders(
+            turn,
+            [
+                {
+                    "id": 14,
+                    "unit_type": "CORE",
+                    "unit_count": 1,
+                    "unit_ids": [CORE_ID],
+                    "target_x": 20,
+                    "target_y": 0,
+                }
+            ],
+        )
+
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+        self.assertEqual(queued["core_action"], {"type": "WAIT"})
+        self.assertEqual(
+            queued["unit_actions"][WORKER_1],
+            {"type": "MOVE", "direction": "LEFT"},
+        )
+
     def test_alliance_rally_pauses_for_bounded_delivery_window(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             shared = Path(directory)
