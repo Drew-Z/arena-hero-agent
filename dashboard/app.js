@@ -375,7 +375,12 @@ function drawUnit(item, relation) {
     context.lineTo(x - radius * 1.45, y);
     context.closePath();
   } else if (item.unit_type === "RANGER") {
-    context.rect(x - radius, y - radius, radius * 2, radius * 2);
+    // 游侠 RANGER：向上箭头三角形（远程/弓箭）
+    const r = radius * 1.35;
+    context.moveTo(x, y - r * 0.95);          // 顶尖箭头
+    context.lineTo(x + r * 0.82, y + r * 0.7); // 右下角
+    context.lineTo(x - r * 0.82, y + r * 0.7); // 左下角
+    context.closePath();
   } else {
     context.arc(x, y, radius, 0, Math.PI * 2);
   }
