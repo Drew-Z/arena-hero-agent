@@ -67,6 +67,20 @@ def _supercover_cells(start: Position, end: Position) -> tuple[Position, ...]:
     return tuple(dict.fromkeys(cells))
 
 
+def position_visible_from(
+    origin: Position,
+    target: Position,
+    radius: int,
+    obstacles: set[Position],
+) -> bool:
+    if abs(target[0] - origin[0]) + abs(target[1] - origin[1]) > radius:
+        return False
+    line = _supercover_cells(origin, target)
+    return target in obstacles or not any(
+        cell in obstacles for cell in line[1:-1]
+    )
+
+
 def visible_cells(state: Mapping[str, Any]) -> set[Position]:
     objects = state.get("objects")
     if not isinstance(objects, list):
@@ -93,10 +107,7 @@ def visible_cells(state: Mapping[str, Any]) -> set[Position]:
         for dx in range(-radius, radius + 1):
             for dy in range(-radius + abs(dx), radius - abs(dx) + 1):
                 target = origin[0] + dx, origin[1] + dy
-                line = _supercover_cells(origin, target)
-                if target in obstacles or not any(
-                    cell in obstacles for cell in line[1:-1]
-                ):
+                if position_visible_from(origin, target, radius, obstacles):
                     visible.add(target)
     return visible
 
