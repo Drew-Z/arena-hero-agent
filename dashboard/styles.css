@@ -291,6 +291,19 @@ button:focus-visible, input:focus-visible, canvas:focus-visible { outline: 2px s
   color: #071014;
   font-weight: 700;
 }
+.relative-coord-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--gold);
+  cursor: pointer;
+  user-select: none;
+}
+
+.relative-coord-label input {
+  accent-color: var(--gold);
+}
 @media (max-width: 1050px) {
   :root { --panel-width: 280px; }
   .metrics span:nth-child(4), .metrics span:nth-child(5) { display: none; }

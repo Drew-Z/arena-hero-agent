@@ -81,7 +81,40 @@ const state = {
   viewport: { width: 1, height: 1 },
   mapIndex: Object.fromEntries(MAP_LAYERS.map((name) => [name, new Map()])),
   unitFilter: "ALL",
+  useRelativeCoords: false,
 };
+// 获取己方 Core 的绝对坐标
+function getCorePosition() {
+  const core = controlledCore();
+  return core?.position || null;
+}
+
+// 绝对坐标 -> 相对坐标
+function toRelativePos(worldPos) {
+  const corePos = getCorePosition();
+  if (!corePos) return worldPos;
+  return [worldPos[0] - corePos[0], worldPos[1] - corePos[1]];
+}
+
+// 相对坐标 -> 绝对坐标 (发送给后台用)
+function toAbsolutePos(relPos) {
+  const corePos = getCorePosition();
+  if (!corePos) return relPos;
+  return [corePos[0] + relPos[0], corePos[1] + relPos[1]];
+}
+
+// 格式化坐标文本显示
+function formatCoordDisplay(worldPos) {
+  const [wx, wy] = worldPos;
+  const rel = toRelativePos(worldPos);
+  
+  if (state.useRelativeCoords && rel) {
+    const rx = rel[0] >= 0 ? `+${rel[0]}` : rel[0];
+    const ry = rel[1] >= 0 ? `+${rel[1]}` : rel[1];
+    return `Δ x ${rx} · y ${ry} (绝对: ${wx}, ${wy})`;
+  }
+  return `x ${wx} · y ${wy}`;
+}
 
 let drawFrame = 0;
 //悬停计时相关变量
@@ -105,7 +138,15 @@ function showHoverTooltip(x, y) {
   // 计算方格在 Canvas 上的屏幕坐标
   const [sx, sy] = screenPosition([x, y]);
   
-  ui.hoverTooltip.textContent = `坐标: (${x}, ${y})`;
+  // 🌟 支持悬停提示框显示相对坐标
+  const rel = toRelativePos([x, y]);
+  if (state.useRelativeCoords && rel) {
+    const rx = rel[0] >= 0 ? `+${rel[0]}` : rel[0];
+    const ry = rel[1] >= 0 ? `+${rel[1]}` : rel[1];
+    ui.hoverTooltip.textContent = `相对 Core: (${rx}, ${ry})`;
+  } else {
+    ui.hoverTooltip.textContent = `坐标: (${x}, ${y})`;
+  }
   ui.hoverTooltip.style.left = `${sx}px`;
   ui.hoverTooltip.style.top = `${sy}px`;
   ui.hoverTooltip.classList.remove("hidden");
@@ -925,16 +966,19 @@ canvas.addEventListener("pointerup", (event) => {
     // 2. 如果点击了空白地图：设置目的地并提交派遣（集体发送所有选中单位）
     if (state.pickingTarget) {
       state.orderTarget = worldPos;
+      //根据当前模式填入相对或绝对坐标
+      const displayPos = state.useRelativeCoords ? toRelativePos(worldPos) : worldPos;
+
       if (state.pickMode === "expedition") {
-        document.querySelector("#expedition-x").value = worldPos[0];
-        document.querySelector("#expedition-y").value = worldPos[1];
-        ui.expeditionStatus.textContent = `目标已选择：${worldPos[0]}, ${worldPos[1]}`;
+        document.querySelector("#expedition-x").value = displayPos[0];
+        document.querySelector("#expedition-y").value = displayPos[1];
+        ui.expeditionStatus.textContent = `目标已选择：${displayPos[0]}, ${displayPos[1]}`;
         setTargetPicking(false);
       } else {
-        [ui.orderX.value, ui.orderY.value] = state.orderTarget;
+        [ui.orderX.value, ui.orderY.value] = displayPos;
         setTargetPicking(false);
 
-        // 提交表单（会自动打包所有勾选的单位 ID）
+        // 提交表单（自动打包所有勾选的单位 ID）
         ui.orderForm.requestSubmit();
       }
       draw();
@@ -998,12 +1042,15 @@ ui.orderForm.addEventListener("submit", async (event) => {
     ui.orderStatus.textContent = "请先选择具体核心或至少一个具体单位";
     return;
   }
+  // 将输入框坐标换算回发送给后端的绝对坐标
+  const inputPos = [Number(ui.orderX.value), Number(ui.orderY.value)];
+  const absPos = state.useRelativeCoords ? toAbsolutePos(inputPos) : inputPos;
   const payload = {
     unit_type: document.querySelector("#order-unit-type").value,
     unit_count: unitIds.length,
     unit_ids: unitIds,
-    target_x: Number(ui.orderX.value),
-    target_y: Number(ui.orderY.value),
+    target_x: absPos[0], // 发给后端的永远是真实的绝对坐标
+    target_y: absPos[1],
   };
   try {
     const response = await fetch("/api/orders", {
@@ -1045,7 +1092,7 @@ ui.orders.addEventListener("click", async (event) => {
 
 canvas.addEventListener("pointermove", (event) => {
   const [x, y] = worldPosition(event.clientX, event.clientY);
-  ui.cursorPosition.textContent = `x ${x} · y ${y}`;
+  ui.cursorPosition.textContent = formatCoordDisplay([x, y]); 
   if (state.dragging) {
     clearHover();
     return;
@@ -1102,13 +1149,19 @@ ui.allianceForm.addEventListener("submit", async (event) => {
 ui.expeditionForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const rawId = document.querySelector("#expedition-id").value;
+  // 将远征队输入的坐标换算回给后端的绝对坐标
+  const inputPos = [
+    Number(document.querySelector("#expedition-x").value),
+    Number(document.querySelector("#expedition-y").value)
+  ];
+  const absPos = state.useRelativeCoords ? toAbsolutePos(inputPos) : inputPos;
   const payload = {
     id: rawId ? Number(rawId) : null,
     name: document.querySelector("#expedition-name").value,
     ranger_count: Number(document.querySelector("#expedition-ranger").value),
     vanguard_count: Number(document.querySelector("#expedition-vanguard").value),
-    target_x: Number(document.querySelector("#expedition-x").value),
-    target_y: Number(document.querySelector("#expedition-y").value),
+    target_x: absPos[0],
+    target_y: absPos[1],
     enabled: document.querySelector("#expedition-enabled").checked,
   };
   try {
@@ -1187,4 +1240,10 @@ document.querySelector("#control-panel")?.addEventListener("click", (event) => {
   if (section) {
     toggleSection(section);
   }
+});
+
+// 相对坐标模式开关监听
+document.querySelector("#toggle-relative-coord")?.addEventListener("change", (event) => {
+  state.useRelativeCoords = event.target.checked;
+  draw();
 });
