@@ -21,6 +21,7 @@ VISION_RADII = {
 Position = tuple[int, int]
 UNIT_ORDER_TYPES = {"WORKER", "VANGUARD", "RANGER"}
 UNIT_ORDER_STATUSES = {"PENDING", "COMPLETED", "CANCELLED"}
+PRODUCTION_UNIT_TYPES = ("WORKER", "VANGUARD", "RANGER")
 INT64_MIN = -(2**63)
 INT64_MAX = 2**63 - 1
 
@@ -177,6 +178,36 @@ def _ensure_combat_records_table(connection: sqlite3.Connection) -> bool:
         )
         return True
     return False
+
+
+def _ensure_control_config_tables(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS production_config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            worker_weight INTEGER NOT NULL,
+            vanguard_weight INTEGER NOT NULL,
+            ranger_weight INTEGER NOT NULL,
+            updated_at REAL NOT NULL,
+            CHECK (worker_weight BETWEEN 0 AND 100),
+            CHECK (vanguard_weight BETWEEN 0 AND 100),
+            CHECK (ranger_weight BETWEEN 0 AND 100)
+        );
+        CREATE TABLE IF NOT EXISTS expeditions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            ranger_count INTEGER NOT NULL,
+            vanguard_count INTEGER NOT NULL,
+            target_x INTEGER NOT NULL,
+            target_y INTEGER NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            updated_at REAL NOT NULL,
+            CHECK (ranger_count BETWEEN 0 AND 32),
+            CHECK (vanguard_count BETWEEN 0 AND 32),
+            CHECK (enabled IN (0, 1))
+        );
+        """
+    )
 
 
 def _enemy_core_username(
@@ -354,6 +385,7 @@ class HistoryRecorder:
             """
         )
         _ensure_unit_orders_table(self.connection)
+        _ensure_control_config_tables(self.connection)
         combat_schema_upgraded = _ensure_combat_records_table(self.connection)
         combat_records_empty = (
             self.connection.execute("SELECT 1 FROM combat_records LIMIT 1").fetchone()
@@ -495,6 +527,9 @@ class HistoryRecorder:
 
     def revenge_usernames(self) -> frozenset[str]:
         return frozenset(username.casefold() for username in _revenge_scores(self.connection))
+
+    def control_config(self) -> dict[str, object]:
+        return _read_control_config(self.connection, ensure_tables=False)
 
     def complete_order(self, order_id: int, *, tick: int) -> None:
         with self.connection:
@@ -643,6 +678,153 @@ def cancel_unit_order(path: Path, order_id: int) -> dict[str, object]:
         ).fetchone()
         assert result is not None
         return _unit_order_dict(result)
+
+
+def _read_control_config(
+    connection: sqlite3.Connection,
+    *,
+    ensure_tables: bool = True,
+) -> dict[str, object]:
+    if ensure_tables:
+        _ensure_control_config_tables(connection)
+    production = connection.execute(
+        "SELECT worker_weight, vanguard_weight, ranger_weight, updated_at "
+        "FROM production_config WHERE id = 1"
+    ).fetchone()
+    expeditions = connection.execute(
+        """
+        SELECT id, name, ranger_count, vanguard_count, target_x, target_y,
+               enabled, updated_at
+        FROM expeditions ORDER BY id
+        """
+    ).fetchall()
+    return {
+        "production": dict(production) if production is not None else None,
+        "expeditions": [
+            {**dict(row), "enabled": bool(row["enabled"])} for row in expeditions
+        ],
+    }
+
+
+def read_control_config(path: Path) -> dict[str, object]:
+    with closing(_connect(path)) as connection:
+        return _read_control_config(connection)
+
+
+def save_production_config(
+    path: Path,
+    *,
+    worker_weight: int,
+    vanguard_weight: int,
+    ranger_weight: int,
+) -> dict[str, object]:
+    weights = (worker_weight, vanguard_weight, ranger_weight)
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in weights):
+        raise ValueError("production weights must be integers")
+    if any(not 0 <= value <= 100 for value in weights) or sum(weights) < 1:
+        raise ValueError("production weights must be 0-100 and not all zero")
+    updated_at = time.time()
+    with closing(_connect(path)) as connection:
+        _ensure_control_config_tables(connection)
+        connection.execute(
+            """
+            INSERT INTO production_config VALUES (1, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                worker_weight=excluded.worker_weight,
+                vanguard_weight=excluded.vanguard_weight,
+                ranger_weight=excluded.ranger_weight,
+                updated_at=excluded.updated_at
+            """,
+            (*weights, updated_at),
+        )
+        connection.commit()
+    return {
+        "worker_weight": worker_weight,
+        "vanguard_weight": vanguard_weight,
+        "ranger_weight": ranger_weight,
+        "updated_at": updated_at,
+    }
+
+
+def save_expedition(
+    path: Path,
+    *,
+    expedition_id: int | None,
+    name: str,
+    ranger_count: int,
+    vanguard_count: int,
+    target: Position,
+    enabled: bool,
+) -> dict[str, object]:
+    normalized_name = str(name).strip()
+    if not normalized_name or len(normalized_name) > 40:
+        raise ValueError("expedition name must contain 1-40 characters")
+    counts = (ranger_count, vanguard_count)
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in counts):
+        raise ValueError("expedition counts must be integers")
+    if any(not 0 <= value <= 32 for value in counts) or not 1 <= sum(counts) <= 32:
+        raise ValueError("expedition must contain 1-32 combat units")
+    if (
+        not isinstance(target, (tuple, list))
+        or len(target) != 2
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not INT64_MIN <= value <= INT64_MAX
+            for value in target
+        )
+    ):
+        raise ValueError("target coordinates must be signed int64 values")
+    if not isinstance(enabled, bool):
+        raise ValueError("enabled must be a boolean")
+    updated_at = time.time()
+    with closing(_connect(path)) as connection:
+        _ensure_control_config_tables(connection)
+        if expedition_id is None:
+            cursor = connection.execute(
+                """
+                INSERT INTO expeditions
+                    (name, ranger_count, vanguard_count, target_x, target_y,
+                     enabled, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (*((normalized_name,) + counts + tuple(target)), int(enabled), updated_at),
+            )
+            expedition_id = int(cursor.lastrowid)
+        else:
+            if isinstance(expedition_id, bool) or expedition_id < 1:
+                raise ValueError("expedition id must be positive")
+            cursor = connection.execute(
+                """
+                UPDATE expeditions SET name=?, ranger_count=?, vanguard_count=?,
+                    target_x=?, target_y=?, enabled=?, updated_at=? WHERE id=?
+                """,
+                (*((normalized_name,) + counts + tuple(target)), int(enabled), updated_at, expedition_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("expedition was not found")
+        connection.commit()
+    return {
+        "id": expedition_id,
+        "name": normalized_name,
+        "ranger_count": ranger_count,
+        "vanguard_count": vanguard_count,
+        "target_x": target[0],
+        "target_y": target[1],
+        "enabled": enabled,
+        "updated_at": updated_at,
+    }
+
+
+def delete_expedition(path: Path, expedition_id: int) -> None:
+    if isinstance(expedition_id, bool) or expedition_id < 1:
+        raise ValueError("expedition id must be positive")
+    with closing(_connect(path)) as connection:
+        _ensure_control_config_tables(connection)
+        cursor = connection.execute("DELETE FROM expeditions WHERE id = ?", (expedition_id,))
+        if cursor.rowcount != 1:
+            raise ValueError("expedition was not found")
+        connection.commit()
 
 
 def read_kill_stats(path: Path, *, recent_limit: int = 32) -> dict[str, object]:

@@ -23,6 +23,9 @@ from arena_history import (
     list_unit_orders,
     read_kill_stats,
     read_overview,
+    read_control_config,
+    save_expedition,
+    save_production_config,
 )
 
 
@@ -289,6 +292,31 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(delta["resource_history"], [])
             self.assertEqual(state_only["state"]["resources"], 37)
             self.assertEqual(state_only["explored"], [])
+
+    def test_control_config_persists_production_and_expedition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            save_production_config(
+                path,
+                worker_weight=4,
+                vanguard_weight=1,
+                ranger_weight=2,
+            )
+            save_expedition(
+                path,
+                expedition_id=None,
+                name="strike-1",
+                ranger_count=2,
+                vanguard_count=2,
+                target=(12, -8),
+                enabled=True,
+            )
+
+            config = read_control_config(path)
+
+            self.assertEqual(config["production"]["ranger_weight"], 2)
+            self.assertEqual(config["expeditions"][0]["name"], "strike-1")
+            self.assertTrue(config["expeditions"][0]["enabled"])
 
     def test_history_limit_removes_old_snapshots_and_core_sightings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

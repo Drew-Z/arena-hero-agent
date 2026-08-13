@@ -32,6 +32,15 @@
   <main class="workspace">
     <section class="map-region" aria-label="战术地图">
       <canvas id="map" tabindex="0"></canvas>
+      <div class="map-toolbar">
+        <button id="fit-map" type="button">适配全图</button>
+        <button id="home-map" type="button">回到 Core</button>
+        <label><input type="checkbox" data-map-layer="explored" checked> 已探索</label>
+        <label><input type="checkbox" data-map-layer="obstacles" checked> 障碍</label>
+        <label><input type="checkbox" data-map-layer="resources" checked> 资源</label>
+        <label><input type="checkbox" data-map-layer="history" checked> 历史</label>
+        <label><input type="checkbox" data-map-layer="routes"> 路线</label>
+      </div>
       <div class="legend" aria-label="地图图例">
         <span><i class="swatch explored"></i>已探索</span>
         <span><i class="swatch obstacle"></i>障碍</span>
@@ -43,6 +52,7 @@
         <span><i class="swatch beacon"></i>冠军信标</span>
       </div>
       <div id="map-status" class="map-status">等待历史数据</div>
+      <div id="cursor-position" class="cursor-position">x -- · y --</div>
     </section>
 
     <aside class="intel-panel">
@@ -63,6 +73,28 @@
         <ol id="ranking-list" class="ranking-list"></ol>
       </section>
       <section id="control-panel" class="panel-view hidden" role="tabpanel">
+        <form id="production-form" class="config-form">
+          <h3>生产比例</h3>
+          <label>Worker <input id="production-worker" type="number" min="0" max="100" value="4" required></label>
+          <label>Vanguard <input id="production-vanguard" type="number" min="0" max="100" value="1" required></label>
+          <label>Ranger <input id="production-ranger" type="number" min="0" max="100" value="1" required></label>
+          <button type="submit">保存生产配置</button>
+          <p id="production-status" class="form-status" aria-live="polite"></p>
+        </form>
+        <form id="expedition-form" class="config-form">
+          <h3>远征队</h3>
+          <input id="expedition-id" type="hidden">
+          <label class="wide">名称 <input id="expedition-name" maxlength="40" value="远征队 1" required></label>
+          <label>Ranger <input id="expedition-ranger" type="number" min="0" max="32" value="2" required></label>
+          <label>Vanguard <input id="expedition-vanguard" type="number" min="0" max="32" value="2" required></label>
+          <label>X <input id="expedition-x" type="number" step="1" value="0" required></label>
+          <label>Y <input id="expedition-y" type="number" step="1" value="0" required></label>
+          <label class="checkbox-label"><input id="expedition-enabled" type="checkbox" checked> 启用</label>
+          <button id="pick-expedition-target" class="secondary-button" type="button">在地图上选择目标</button>
+          <button type="submit">保存远征队</button>
+          <p id="expedition-status" class="form-status" aria-live="polite"></p>
+        </form>
+        <ol id="expedition-list" class="event-list"></ol>
         <form id="order-form" class="order-form">
           <label>兵种
             <select id="order-unit-type">

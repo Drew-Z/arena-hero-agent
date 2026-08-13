@@ -15,10 +15,14 @@ import httpx
 from arena_history import (
     cancel_unit_order,
     create_unit_order,
+    delete_expedition,
     list_ticks,
     list_unit_orders,
+    read_control_config,
     read_kill_stats,
     read_overview,
+    save_expedition,
+    save_production_config,
 )
 
 
@@ -160,10 +164,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/kills":
             self._send_json(read_kill_stats(self.server.app.history_db))
             return
+        if parsed.path == "/api/control-config":
+            self._send_json(read_control_config(self.server.app.history_db))
+            return
         self._send_static(parsed.path)
 
     def do_POST(self) -> None:
-        if urlparse(self.path).path != "/api/orders":
+        path = urlparse(self.path).path
+        if path not in {"/api/orders", "/api/control-config", "/api/expeditions"}:
             self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
             return
         try:
@@ -173,35 +181,58 @@ class DashboardHandler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload, dict):
                 raise ValueError("request body must be an object")
-            order = create_unit_order(
-                self.server.app.history_db,
-                unit_type=payload.get("unit_type", ""),
-                unit_count=payload.get("unit_count", 0),
-                unit_ids=payload.get("unit_ids", []),
-                target=(payload.get("target_x"), payload.get("target_y")),
-            )
+            if path == "/api/orders":
+                result = create_unit_order(
+                    self.server.app.history_db,
+                    unit_type=payload.get("unit_type", ""),
+                    unit_count=payload.get("unit_count", 0),
+                    unit_ids=payload.get("unit_ids", []),
+                    target=(payload.get("target_x"), payload.get("target_y")),
+                )
+            elif path == "/api/control-config":
+                result = save_production_config(
+                    self.server.app.history_db,
+                    worker_weight=payload.get("worker_weight"),
+                    vanguard_weight=payload.get("vanguard_weight"),
+                    ranger_weight=payload.get("ranger_weight"),
+                )
+            else:
+                result = save_expedition(
+                    self.server.app.history_db,
+                    expedition_id=payload.get("id"),
+                    name=payload.get("name", ""),
+                    ranger_count=payload.get("ranger_count"),
+                    vanguard_count=payload.get("vanguard_count"),
+                    target=(payload.get("target_x"), payload.get("target_y")),
+                    enabled=payload.get("enabled", True),
+                )
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             self._send_json(
-                {"error": "invalid_order", "message": str(exc)},
+                {"error": "invalid_control_request", "message": str(exc)},
                 status=HTTPStatus.BAD_REQUEST,
             )
             return
-        self._send_json(order, status=HTTPStatus.CREATED)
+        self._send_json(result, status=HTTPStatus.CREATED)
 
     def do_DELETE(self) -> None:
         parts = urlparse(self.path).path.strip("/").split("/")
-        if len(parts) != 3 or parts[:2] != ["api", "orders"]:
+        if len(parts) != 3 or parts[:2] not in (["api", "orders"], ["api", "expeditions"]):
             self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
             return
         try:
-            order = cancel_unit_order(self.server.app.history_db, int(parts[2]))
+            item_id = int(parts[2])
+            if parts[1] == "orders":
+                result = cancel_unit_order(self.server.app.history_db, item_id)
+            else:
+                delete_expedition(self.server.app.history_db, item_id)
+                result = {"id": item_id, "deleted": True}
         except (ValueError, TypeError) as exc:
             self._send_json(
-                {"error": "invalid_order", "message": str(exc)},
+                {"error": "invalid_control_request", "message": str(exc)},
                 status=HTTPStatus.BAD_REQUEST,
             )
             return
-        self._send_json(order)
+        self._send_json(result)
 
     def _send_json(
         self,

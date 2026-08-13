@@ -29,6 +29,13 @@ const ui = {
   pickTarget: document.querySelector("#pick-order-target"),
   orderX: document.querySelector("#order-x"),
   orderY: document.querySelector("#order-y"),
+  cursorPosition: document.querySelector("#cursor-position"),
+  productionForm: document.querySelector("#production-form"),
+  productionStatus: document.querySelector("#production-status"),
+  expeditionForm: document.querySelector("#expedition-form"),
+  expeditionStatus: document.querySelector("#expedition-status"),
+  expeditionList: document.querySelector("#expedition-list"),
+  pickExpeditionTarget: document.querySelector("#pick-expedition-target"),
 };
 
 const colors = {
@@ -64,6 +71,9 @@ const state = {
   pointerStart: null,
   pickingTarget: false,
   orderTarget: null,
+  controlConfig: { production: null, expeditions: [] },
+  layers: { explored: true, obstacles: true, resources: true, history: true, routes: false },
+  pickMode: null,
   viewport: { width: 1, height: 1 },
   mapIndex: Object.fromEntries(MAP_LAYERS.map((name) => [name, new Map()])),
 };
@@ -260,6 +270,37 @@ function drawOrderTarget() {
   context.restore();
 }
 
+function drawRoutes(overview) {
+  if (!state.layers.routes) return;
+  const units = new Map(
+    (overview.state.objects || [])
+      .filter((item) => item.kind === "UNIT" && item.controlled)
+      .map((item) => [item.id, item]),
+  );
+  const routes = [];
+  (state.orders || []).filter((item) => item.status === "PENDING").forEach((order) => {
+    order.unit_ids.forEach((id) => routes.push([id, [order.target_x, order.target_y]]));
+  });
+  (state.controlConfig.expeditions || []).filter((item) => item.enabled).forEach((expedition) => {
+    const memberIds = overview.strategy.expedition_members?.[String(expedition.id)] || [];
+    memberIds.forEach((id) => routes.push([id, [expedition.target_x, expedition.target_y]]));
+  });
+  context.save();
+  context.strokeStyle = "rgba(240,200,76,0.48)";
+  context.setLineDash([5, 5]);
+  routes.forEach(([id, target]) => {
+    const unit = units.get(id);
+    if (!unit) return;
+    const [x1, y1] = screenPosition(unit.position);
+    const [x2, y2] = screenPosition(target);
+    context.beginPath();
+    context.moveTo(x1, y1);
+    context.lineTo(x2, y2);
+    context.stroke();
+  });
+  context.restore();
+}
+
 function draw() {
   const rect = state.viewport;
   context.fillStyle = colors.background;
@@ -274,19 +315,19 @@ function draw() {
     context.textAlign = "start";
     return;
   }
-  drawIndexedCells("explored", colors.explored);
-  drawIndexedCells("obstacles", colors.obstacle, 0.72);
-  drawIndexedCells("resource_history", colors.resourceHistory, 0.34);
-  Object.values(overview.trails || {}).forEach(drawTrail);
+  if (state.layers.explored) drawIndexedCells("explored", colors.explored);
+  if (state.layers.obstacles) drawIndexedCells("obstacles", colors.obstacle, 0.72);
+  if (state.layers.history) drawIndexedCells("resource_history", colors.resourceHistory, 0.34);
+  if (state.layers.routes) Object.values(overview.trails || {}).forEach(drawTrail);
 
   const objects = overview.state.objects || [];
-  overview.enemy_core_history
+  (state.layers.history ? overview.enemy_core_history : [])
     .filter((item) => !item.currently_visible)
     .forEach((item) => drawCore(item, false, true));
 
   const objectById = new Map();
   for (const item of objects) {
-    if (item.kind === "RESOURCE") item.positions.forEach((position) => drawCell(position, colors.resource, 0.5));
+    if (state.layers.resources && item.kind === "RESOURCE") item.positions.forEach((position) => drawCell(position, colors.resource, 0.5));
     if (item.id) objectById.set(item.id, item);
   }
   for (const item of objects) {
@@ -294,6 +335,7 @@ function draw() {
     if (item.kind === "UNIT") drawUnit(item, item.controlled);
   }
   drawPlan(overview, objectById);
+  drawRoutes(overview);
 
   const beacon = overview.state.champion_beacon;
   if (beacon?.position) {
@@ -311,11 +353,29 @@ function draw() {
   drawOrderTarget();
 }
 
-function setTargetPicking(active) {
+function setTargetPicking(active, mode = "order") {
   state.pickingTarget = active;
+  state.pickMode = active ? mode : null;
   ui.pickTarget.classList.toggle("active", active);
+  ui.pickExpeditionTarget.classList.toggle("active", active && mode === "expedition");
   ui.pickTarget.textContent = active ? "点击地图选择目标（可拖动）" : "在地图上选择目标";
   canvas.classList.toggle("picking-target", active);
+}
+
+function fitMap() {
+  const cells = [...state.mapIndex.explored.values()].flat();
+  if (!cells.length) return;
+  let minX = cells[0][0]; let maxX = minX; let minY = cells[0][1]; let maxY = minY;
+  cells.forEach(([x, y]) => {
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+  });
+  state.view.x = (minX + maxX) / 2;
+  state.view.y = (minY + maxY) / 2;
+  state.view.scale = Math.max(1.5, Math.min(32,
+    Math.min(state.viewport.width / Math.max(1, maxX - minX + 4), state.viewport.height / Math.max(1, maxY - minY + 4))));
+  updateMetrics();
+  draw();
 }
 
 function controlledCore() {
@@ -508,6 +568,29 @@ function renderControl() {
     });
   }
   renderUnitPicker();
+  renderExpeditions();
+}
+
+function renderExpeditions() {
+  ui.expeditionList.replaceChildren();
+  const expeditions = state.controlConfig.expeditions || [];
+  (expeditions.length ? expeditions : [{ empty: true }]).forEach((expedition) => {
+    const item = document.createElement("li");
+    if (expedition.empty) {
+      item.className = "empty-state";
+      item.textContent = "暂无远征队";
+    } else {
+      item.className = "order-item";
+      const summary = document.createElement("span");
+      summary.textContent = `${expedition.enabled ? "启用" : "暂停"} · ${expedition.name} · ${expedition.ranger_count}R ${expedition.vanguard_count}V → (${expedition.target_x},${expedition.target_y})`;
+      const edit = document.createElement("button");
+      edit.type = "button"; edit.dataset.editExpedition = expedition.id; edit.textContent = "编辑";
+      const remove = document.createElement("button");
+      remove.type = "button"; remove.dataset.deleteExpedition = expedition.id; remove.textContent = "删除";
+      item.append(summary, edit, remove);
+    }
+    ui.expeditionList.append(item);
+  });
 }
 
 function renderUnitPicker() {
@@ -601,17 +684,25 @@ async function refreshLeaderboard() {
 
 async function refreshControl() {
   try {
-    const [kills, orders, overview] = await Promise.all([
+    const [kills, orders, overview, controlConfig] = await Promise.all([
       fetchJson("/api/kills"),
       fetchJson("/api/orders"),
       fetchJson("/api/overview?history=0"),
+      fetchJson("/api/control-config"),
     ]);
     state.kills = kills;
     state.orders = orders || [];
+    state.controlConfig = controlConfig;
     state.controlUnits = (overview.state?.objects || []).filter(
       (item) => item.kind === "UNIT" && item.controlled === true,
     );
     renderControl();
+    const production = controlConfig.production;
+    if (production && document.activeElement?.form !== ui.productionForm) {
+      document.querySelector("#production-worker").value = production.worker_weight;
+      document.querySelector("#production-vanguard").value = production.vanguard_weight;
+      document.querySelector("#production-ranger").value = production.ranger_weight;
+    }
   } catch (error) {
     ui.orderStatus.textContent = `调兵接口错误 · ${error.message}`;
   }
@@ -678,8 +769,14 @@ canvas.addEventListener("pointerup", (event) => {
   canvas.releasePointerCapture(event.pointerId);
   if (state.pickingTarget && !moved) {
     state.orderTarget = worldPosition(event.clientX, event.clientY);
-    [ui.orderX.value, ui.orderY.value] = state.orderTarget;
-    ui.orderStatus.textContent = `目标已选择：${state.orderTarget[0]}, ${state.orderTarget[1]}`;
+    if (state.pickMode === "expedition") {
+      document.querySelector("#expedition-x").value = state.orderTarget[0];
+      document.querySelector("#expedition-y").value = state.orderTarget[1];
+      ui.expeditionStatus.textContent = `目标已选择：${state.orderTarget[0]}, ${state.orderTarget[1]}`;
+    } else {
+      [ui.orderX.value, ui.orderY.value] = state.orderTarget;
+      ui.orderStatus.textContent = `目标已选择：${state.orderTarget[0]}, ${state.orderTarget[1]}`;
+    }
     setTargetPicking(false);
     draw();
   }
@@ -707,7 +804,14 @@ document.querySelectorAll(".ranking-mode").forEach((button) => button.addEventLi
   document.querySelectorAll(".ranking-mode").forEach((item) => item.classList.toggle("active", item === button));
   renderRanking();
 }));
-ui.pickTarget.addEventListener("click", () => setTargetPicking(!state.pickingTarget));
+document.querySelector("#fit-map").addEventListener("click", fitMap);
+document.querySelector("#home-map").addEventListener("click", () => centerMap(true));
+document.querySelectorAll("[data-map-layer]").forEach((input) => input.addEventListener("change", () => {
+  state.layers[input.dataset.mapLayer] = input.checked;
+  draw();
+}));
+ui.pickTarget.addEventListener("click", () => setTargetPicking(!state.pickingTarget, "order"));
+ui.pickExpeditionTarget.addEventListener("click", () => setTargetPicking(!state.pickingTarget, "expedition"));
 [ui.orderX, ui.orderY].forEach((input) => input.addEventListener("change", () => {
   const position = [Number(ui.orderX.value), Number(ui.orderY.value)];
   state.orderTarget = position.every(Number.isSafeInteger) ? position : null;
@@ -764,6 +868,83 @@ ui.orders.addEventListener("click", async (event) => {
   } catch (error) {
     button.disabled = false;
     ui.orderStatus.textContent = `取消失败 · ${error.message}`;
+  }
+});
+
+canvas.addEventListener("pointermove", (event) => {
+  const [x, y] = worldPosition(event.clientX, event.clientY);
+  ui.cursorPosition.textContent = `x ${x} · y ${y}`;
+});
+
+ui.productionForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const payload = {
+    worker_weight: Number(document.querySelector("#production-worker").value),
+    vanguard_weight: Number(document.querySelector("#production-vanguard").value),
+    ranger_weight: Number(document.querySelector("#production-ranger").value),
+  };
+  try {
+    const response = await fetch("/api/control-config", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.message || response.statusText);
+    ui.productionStatus.textContent = "生产比例已保存，将在下个 Tick 生效";
+    await refreshControl();
+  } catch (error) {
+    ui.productionStatus.textContent = `保存失败 · ${error.message}`;
+  }
+});
+
+ui.expeditionForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const rawId = document.querySelector("#expedition-id").value;
+  const payload = {
+    id: rawId ? Number(rawId) : null,
+    name: document.querySelector("#expedition-name").value,
+    ranger_count: Number(document.querySelector("#expedition-ranger").value),
+    vanguard_count: Number(document.querySelector("#expedition-vanguard").value),
+    target_x: Number(document.querySelector("#expedition-x").value),
+    target_y: Number(document.querySelector("#expedition-y").value),
+    enabled: document.querySelector("#expedition-enabled").checked,
+  };
+  try {
+    const response = await fetch("/api/expeditions", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.message || response.statusText);
+    ui.expeditionStatus.textContent = "远征队已保存，将在下个 Tick 生效";
+    document.querySelector("#expedition-id").value = "";
+    await refreshControl();
+  } catch (error) {
+    ui.expeditionStatus.textContent = `保存失败 · ${error.message}`;
+  }
+});
+
+ui.expeditionList.addEventListener("click", async (event) => {
+  const edit = event.target.closest("button[data-edit-expedition]");
+  const remove = event.target.closest("button[data-delete-expedition]");
+  if (edit) {
+    const expedition = state.controlConfig.expeditions.find((item) => item.id === Number(edit.dataset.editExpedition));
+    if (!expedition) return;
+    document.querySelector("#expedition-id").value = expedition.id;
+    document.querySelector("#expedition-name").value = expedition.name;
+    document.querySelector("#expedition-ranger").value = expedition.ranger_count;
+    document.querySelector("#expedition-vanguard").value = expedition.vanguard_count;
+    document.querySelector("#expedition-x").value = expedition.target_x;
+    document.querySelector("#expedition-y").value = expedition.target_y;
+    document.querySelector("#expedition-enabled").checked = expedition.enabled;
+    return;
+  }
+  if (!remove) return;
+  try {
+    const response = await fetch(`/api/expeditions/${encodeURIComponent(remove.dataset.deleteExpedition)}`, { method: "DELETE" });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.message || response.statusText);
+    await refreshControl();
+  } catch (error) {
+    ui.expeditionStatus.textContent = `删除失败 · ${error.message}`;
   }
 });
 

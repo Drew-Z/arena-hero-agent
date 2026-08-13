@@ -1779,6 +1779,8 @@ class CoreFarmer:
         self.threat_caution_until_tick = 0
         self.startup_tick: int | None = None
         self.manual_order_ids: tuple[int, ...] = ()
+        self.production_weights: dict[UnitType, int] | None = None
+        self.expedition_members: dict[int, set[UUID]] = {}
         self.revenge_usernames: set[str] = set()
 
     @property
@@ -3653,6 +3655,12 @@ class CoreFarmer:
                 for unit in selected
             )
             for unit in selected:
+                if order.get("preserve_combat") and _legal_attack_targets(
+                    unit,
+                    enemies,
+                    context.obstacles,
+                ):
+                    continue
                 if arrived:
                     unit.wait()
                 elif not _queue_toward(
@@ -3670,6 +3678,82 @@ class CoreFarmer:
                 active_ids.append(order_id)
         self.manual_order_ids = tuple(active_ids)
         return tuple(completed)
+
+    def expedition_orders(
+        self,
+        turn: Turn,
+        expeditions: Sequence[Mapping[str, object]],
+        *,
+        claimed_ids: set[UUID],
+    ) -> tuple[dict[str, object], ...]:
+        if turn.core is None:
+            self.expedition_members.clear()
+            return ()
+        guard_vanguards, guard_rangers = _core_guard_ids(turn)
+        guards = guard_vanguards | guard_rangers
+        units_by_id = {unit.id: unit for unit in (*turn.vanguards, *turn.rangers)}
+        active_ids = {int(item["id"]) for item in expeditions if item.get("enabled")}
+        for expedition_id in set(self.expedition_members) - active_ids:
+            self.expedition_members.pop(expedition_id, None)
+
+        orders: list[dict[str, object]] = []
+        for expedition in expeditions:
+            if not expedition.get("enabled"):
+                continue
+            expedition_id = int(expedition["id"])
+            target = (int(expedition["target_x"]), int(expedition["target_y"]))
+            members = {
+                unit_id
+                for unit_id in self.expedition_members.get(expedition_id, set())
+                if unit_id in units_by_id and unit_id not in claimed_ids and unit_id not in guards
+            }
+            for unit_type, count_key in (
+                (UnitType.RANGER, "ranger_count"),
+                (UnitType.VANGUARD, "vanguard_count"),
+            ):
+                desired = int(expedition[count_key])
+                typed = sorted(
+                    (
+                        unit_id
+                        for unit_id in members
+                        if units_by_id[unit_id].unit_type is unit_type
+                    ),
+                    key=lambda unit_id: unit_id.bytes,
+                )[:desired]
+                members = {
+                    unit_id
+                    for unit_id in members
+                    if units_by_id[unit_id].unit_type is not unit_type
+                } | set(typed)
+                if len(typed) < desired:
+                    candidates = sorted(
+                        (
+                            unit
+                            for unit in units_by_id.values()
+                            if unit.unit_type is unit_type
+                            and unit.id not in members
+                            and unit.id not in claimed_ids
+                            and unit.id not in guards
+                        ),
+                        key=lambda unit: (_distance(unit.position, target), _uuid_sort_key(unit)),
+                    )
+                    typed.extend(unit.id for unit in candidates[: desired - len(typed)])
+                members.update(typed)
+                claimed_ids.update(typed)
+                if typed:
+                    orders.append(
+                        {
+                            "id": -expedition_id * 10 - int(unit_type is UnitType.VANGUARD),
+                            "preserve_combat": True,
+                            "unit_type": unit_type.value,
+                            "unit_count": len(typed),
+                            "unit_ids": [str(unit_id) for unit_id in typed],
+                            "target_x": target[0],
+                            "target_y": target[1],
+                        }
+                    )
+            self.expedition_members[expedition_id] = members
+        return tuple(orders)
 
     def _beacon_campaign_ready(self, turn: Turn, target: object | None) -> bool:
         core = turn.core
@@ -5048,6 +5132,43 @@ class CoreFarmer:
             and len(turn.rangers) < EARLY_DEFENSE_RANGER_TARGET
         ):
             next_unit = UnitType.RANGER
+        elif (
+            self.production_weights
+            and not self.recovery_mode
+            and len(turn.workers) >= BASE_WORKER_TARGET
+            and len(turn.vanguards) >= EARLY_DEFENSE_VANGUARD_TARGET
+            and len(turn.rangers) >= EARLY_DEFENSE_RANGER_TARGET
+        ):
+            counts = {
+                UnitType.WORKER: len(turn.workers),
+                UnitType.VANGUARD: len(turn.vanguards),
+                UnitType.RANGER: len(turn.rangers),
+            }
+            eligible = [
+                unit_type
+                for unit_type in (UnitType.WORKER, UnitType.VANGUARD, UnitType.RANGER)
+                if self.production_weights.get(unit_type, 0) > 0
+                and (
+                    unit_type is not UnitType.WORKER
+                    or counts[unit_type] < self.worker_target
+                )
+            ]
+            if eligible:
+                total_weight = sum(self.production_weights[unit_type] for unit_type in eligible)
+                next_unit = max(
+                    eligible,
+                    key=lambda unit_type: (
+                        (population + 1) * self.production_weights[unit_type]
+                        - counts[unit_type] * total_weight,
+                        -(
+                            UnitType.WORKER,
+                            UnitType.VANGUARD,
+                            UnitType.RANGER,
+                        ).index(unit_type),
+                    ),
+                )
+            else:
+                return None
 
         reserve = (
             0
@@ -5729,11 +5850,35 @@ def play(
                         _reconcile_resource_turn(resource_ledger_snapshot, turn)
                     )
                 active_orders = history.active_orders() if history is not None else ()
+                control_config = history.control_config() if history is not None else {}
+                production = control_config.get("production")
+                tactic.production_weights = (
+                    {
+                        UnitType.WORKER: int(production["worker_weight"]),
+                        UnitType.VANGUARD: int(production["vanguard_weight"]),
+                        UnitType.RANGER: int(production["ranger_weight"]),
+                    }
+                    if isinstance(production, Mapping)
+                    else None
+                )
                 tactic.revenge_usernames = (
                     set(history.revenge_usernames()) if history is not None else set()
                 )
                 tactic.choose_actions(turn)
-                completed_orders = tactic.apply_unit_orders(turn, active_orders)
+                claimed_ids = {
+                    UUID(str(unit_id))
+                    for order in active_orders
+                    for unit_id in order.get("unit_ids", ())
+                }
+                expedition_orders = tactic.expedition_orders(
+                    turn,
+                    control_config.get("expeditions", ()),
+                    claimed_ids=claimed_ids,
+                )
+                completed_orders = tactic.apply_unit_orders(
+                    turn,
+                    (*active_orders, *expedition_orders),
+                )
                 try:
                     accepted = turn.submit()
                 except APIError as exc:
@@ -5749,6 +5894,8 @@ def play(
                 watchdog.mark_accepted()
                 if history is not None:
                     for order_id in completed_orders:
+                        if order_id < 1:
+                            continue
                         history.complete_order(order_id, tick=turn.tick)
                 resource_ledger_snapshot = _resource_ledger_snapshot(turn)
                 if history is not None:
@@ -5776,6 +5923,16 @@ def play(
                                     else None
                                 ),
                                 "manual_orders": list(tactic.manual_order_ids),
+                                "expedition_members": {
+                                    str(expedition_id): [
+                                        str(unit_id)
+                                        for unit_id in sorted(
+                                            member_ids,
+                                            key=lambda item: item.bytes,
+                                        )
+                                    ]
+                                    for expedition_id, member_ids in tactic.expedition_members.items()
+                                },
                             },
                         )
                     except (OSError, sqlite3.Error) as exc:

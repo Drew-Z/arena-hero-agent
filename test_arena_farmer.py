@@ -290,6 +290,99 @@ class DynamicPricingTests(unittest.TestCase):
 
 
 class CoreFarmerTests(unittest.TestCase):
+    def test_production_weights_choose_largest_ratio_deficit(self) -> None:
+        tactic = CoreFarmer(worker_target=18, beacon_policy="hold")
+        tactic.production_weights = {
+            UnitType.WORKER: 1,
+            UnitType.VANGUARD: 1,
+            UnitType.RANGER: 4,
+        }
+        turn = make_turn(
+            resources=200,
+            units=self._workers(8) + [
+                unit(VANGUARD_1, "VANGUARD", (3, 0)),
+                unit(RANGER_1, "RANGER", (-3, 0)),
+            ],
+        )
+
+        tactic.choose_actions(turn)
+
+        self.assertEqual(
+            turn.plan.model_dump(mode="json", exclude_none=True)["core_action"]["unit_type"],
+            "RANGER",
+        )
+
+    def test_production_weights_do_not_override_initial_force_stage(self) -> None:
+        tactic = CoreFarmer(worker_target=18, beacon_policy="hold")
+        tactic.production_weights = {
+            UnitType.WORKER: 0,
+            UnitType.VANGUARD: 0,
+            UnitType.RANGER: 1,
+        }
+        turn = make_turn(resources=200, units=[])
+
+        tactic.choose_actions(turn)
+
+        self.assertEqual(
+            turn.plan.model_dump(mode="json", exclude_none=True)["core_action"]["unit_type"],
+            "WORKER",
+        )
+
+    def test_expedition_keeps_core_guards_unclaimed(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        turn = make_turn(
+            units=[
+                unit(VANGUARD_1, "VANGUARD", (0, 1)),
+                unit(VANGUARD_2, "VANGUARD", (8, 0)),
+                unit(RANGER_1, "RANGER", (1, 0)),
+                unit(RANGER_2, "RANGER", (9, 0)),
+            ]
+        )
+
+        orders = tactic.expedition_orders(
+            turn,
+            [{
+                "id": 3,
+                "enabled": True,
+                "ranger_count": 1,
+                "vanguard_count": 1,
+                "target_x": 20,
+                "target_y": 0,
+            }],
+            claimed_ids=set(),
+        )
+
+        selected = {unit_id for order in orders for unit_id in order["unit_ids"]}
+        self.assertEqual(selected, {VANGUARD_2, RANGER_2})
+
+    def test_expedition_preserves_existing_combat_action(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        turn = make_turn(
+            units=[unit(RANGER_1, "RANGER", (0, 0))],
+            enemies=[unit(ENEMY_1, "VANGUARD", (2, 0), controlled=False)],
+        )
+        tactic.choose_actions(turn)
+        before = turn.plan.model_dump(mode="json", exclude_none=True)["unit_actions"][RANGER_1]
+
+        tactic.apply_unit_orders(
+            turn,
+            [{
+                "id": -10,
+                "preserve_combat": True,
+                "unit_type": "RANGER",
+                "unit_count": 1,
+                "unit_ids": [RANGER_1],
+                "target_x": 20,
+                "target_y": 0,
+            }],
+        )
+
+        self.assertEqual(before["type"], "SHOOT")
+        self.assertEqual(
+            turn.plan.model_dump(mode="json", exclude_none=True)["unit_actions"][RANGER_1],
+            before,
+        )
+
     def test_dashboard_order_overrides_worker_action(self) -> None:
         turn = make_turn(
             units=[unit(WORKER_1, "WORKER", (0, 0), cargo=0)],
