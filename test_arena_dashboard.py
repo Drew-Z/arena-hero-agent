@@ -345,6 +345,51 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(visible["age_ticks"], 0)
             self.assertEqual((visible["x"], visible["y"]), (5, 0))
 
+    def test_destroyed_enemy_core_is_removed_from_later_history(self) -> None:
+        destruction = {
+            "event_id": "20000000-0000-4000-8000-000000000030",
+            "tick": 42,
+            "event_type": "DESTRUCTION_PARTICIPATION",
+            "reason_code": "CORE",
+            "target_id": ENEMY_CORE_ID,
+            "position": [4, 0],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            with HistoryRecorder(path) as recorder:
+                recorder.record(make_turn(41, enemy_position=(4, 0)))
+                recorder.record(
+                    make_turn(42, enemy_position=None, events=[destruction])
+                )
+
+            self.assertEqual(
+                read_overview(path, tick=41)["enemy_core_history"][0]["core_id"],
+                ENEMY_CORE_ID,
+            )
+            self.assertEqual(read_overview(path, tick=42)["enemy_core_history"], [])
+
+    def test_enemy_core_reappearing_after_destruction_is_shown_again(self) -> None:
+        destruction = {
+            "event_id": "20000000-0000-4000-8000-000000000031",
+            "tick": 42,
+            "event_type": "DESTRUCTION_PARTICIPATION",
+            "reason_code": "CORE",
+            "target_id": ENEMY_CORE_ID,
+            "position": [4, 0],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            with HistoryRecorder(path) as recorder:
+                recorder.record(make_turn(41, enemy_position=(4, 0)))
+                recorder.record(
+                    make_turn(42, enemy_position=None, events=[destruction])
+                )
+                recorder.record(make_turn(43, enemy_position=(8, 0)))
+
+            history = read_overview(path, tick=43)["enemy_core_history"]
+            self.assertEqual(len(history), 1)
+            self.assertEqual((history[0]["x"], history[0]["y"]), (8, 0))
+
     def test_overview_can_return_only_new_map_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.sqlite3"

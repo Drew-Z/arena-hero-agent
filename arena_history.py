@@ -262,6 +262,49 @@ def _ensure_control_config_tables(connection: sqlite3.Connection) -> None:
     )
 
 
+def _record_enemy_core_destructions(
+    connection: sqlite3.Connection,
+    state: Mapping[str, object],
+    snapshot_tick: int,
+    *,
+    allied_object_ids: frozenset[str] = frozenset(),
+) -> None:
+    events = state.get("events", [])
+    if not isinstance(events, list):
+        return
+    for event in events:
+        if (
+            not isinstance(event, dict)
+            or event.get("event_type") != "DESTRUCTION_PARTICIPATION"
+            or event.get("reason_code") != "CORE"
+        ):
+            continue
+        core_id = str(event.get("target_id", ""))
+        if not core_id or core_id in allied_object_ids:
+            continue
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO enemy_core_destructions (core_id, tick, event_id)
+            VALUES (?, ?, ?)
+            """,
+            (
+                core_id,
+                int(event.get("tick", snapshot_tick)),
+                str(event.get("event_id", "")),
+            ),
+        )
+
+
+def _backfill_enemy_core_destructions(connection: sqlite3.Connection) -> None:
+    for row in connection.execute("SELECT tick, state_json FROM snapshots"):
+        try:
+            state = json.loads(row["state_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(state, dict):
+            _record_enemy_core_destructions(connection, state, int(row["tick"]))
+
+
 def _enemy_core_username(
     connection: sqlite3.Connection,
     core_id: object,
@@ -448,8 +491,18 @@ class HistoryRecorder:
             );
             CREATE INDEX IF NOT EXISTS enemy_core_tick_idx
                 ON enemy_core_sightings (tick);
+            CREATE TABLE IF NOT EXISTS enemy_core_destructions (
+                core_id TEXT NOT NULL,
+                tick INTEGER NOT NULL,
+                event_id TEXT NOT NULL,
+                PRIMARY KEY (core_id, tick, event_id)
+            );
+            CREATE INDEX IF NOT EXISTS enemy_core_destruction_tick_idx
+                ON enemy_core_destructions (tick);
             """
         )
+        with self.connection:
+            _backfill_enemy_core_destructions(self.connection)
         _ensure_unit_orders_table(self.connection)
         _ensure_control_config_tables(self.connection)
         combat_schema_upgraded = _ensure_combat_records_table(self.connection)
@@ -555,6 +608,12 @@ class HistoryRecorder:
                         str(item.get("state", "UNKNOWN")),
                     ),
                 )
+            _record_enemy_core_destructions(
+                self.connection,
+                state,
+                tick,
+                allied_object_ids=allied_ids,
+            )
             _record_combat_events(
                 self.connection,
                 state,
@@ -573,6 +632,10 @@ class HistoryRecorder:
                 )
                 self.connection.execute(
                     "DELETE FROM enemy_core_sightings WHERE tick < ?",
+                    (cutoff["tick"],),
+                )
+                self.connection.execute(
+                    "DELETE FROM enemy_core_destructions WHERE tick < ?",
                     (cutoff["tick"],),
                 )
 
@@ -1133,8 +1196,14 @@ def read_overview(
                 FROM enemy_core_sightings WHERE tick <= ? GROUP BY core_id
             ) AS latest
             ON latest.core_id = sighting.core_id AND latest.tick = sighting.tick
+            WHERE NOT EXISTS (
+                SELECT 1 FROM enemy_core_destructions AS destruction
+                WHERE destruction.core_id = sighting.core_id
+                  AND destruction.tick >= sighting.tick
+                  AND destruction.tick <= ?
+            )
             """,
-            (selected_tick,),
+            (selected_tick, selected_tick),
         ).fetchall()
         trail_rows = connection.execute(
             """
