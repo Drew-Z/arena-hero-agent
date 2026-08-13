@@ -257,6 +257,54 @@ class AllianceCoordinatorTests(unittest.TestCase):
             self.assertEqual(queued["core_action"]["direction"], "RIGHT")
             self.assertEqual(tactic.active_core_move_reason, "ALLY_RALLY")
 
+    def test_configured_alliance_rally_radius_controls_stop_distance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            shared = Path(directory)
+            leader = AllianceCoordinator(
+                shared,
+                alliance_id="duo",
+                account_id="account-2",
+                expected_members=2,
+                barrier_timeout_seconds=0,
+            )
+            follower = AllianceCoordinator(
+                shared,
+                alliance_id="duo",
+                account_id="account-1",
+                expected_members=2,
+                barrier_timeout_seconds=0,
+            )
+            leader.publish(
+                make_turn(
+                    tick=100,
+                    core_identifier=ALLY_CORE_ID,
+                    owner_username="ally",
+                    core_position=(20, 0),
+                    units=[unit(ALLY_UNIT_ID, "WORKER", (20, 1), cargo=0)],
+                )
+            )
+            turn = make_turn(
+                tick=100,
+                core_position=(0, 0),
+                units=[unit(WORKER_1, "WORKER", (5, 5), cargo=0)],
+            )
+            tactic = CoreFarmer(
+                worker_target=1,
+                beacon_policy="hold",
+                alliance_coordinator=follower,
+            )
+            tactic.alliance_rally_radius = 24
+
+            tactic.choose_actions(turn)
+
+            self.assertIsNone(tactic._alliance_rally_target(turn))
+            core_action = turn.plan.model_dump(mode="json", exclude_none=True).get(
+                "core_action"
+            )
+            self.assertTrue(
+                core_action is None or core_action["type"] != "START_MOVE"
+            )
+
     def test_follower_core_routes_around_obstacles_toward_leader(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             shared = Path(directory)

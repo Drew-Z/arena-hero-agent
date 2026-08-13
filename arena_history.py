@@ -22,6 +22,9 @@ Position = tuple[int, int]
 UNIT_ORDER_TYPES = {"CORE", "WORKER", "VANGUARD", "RANGER"}
 UNIT_ORDER_STATUSES = {"PENDING", "COMPLETED", "CANCELLED"}
 PRODUCTION_UNIT_TYPES = ("WORKER", "VANGUARD", "RANGER")
+DEFAULT_ALLIANCE_RALLY_RADIUS = 12
+MIN_ALLIANCE_RALLY_RADIUS = 1
+MAX_ALLIANCE_RALLY_RADIUS = 256
 INT64_MIN = -(2**63)
 INT64_MAX = 2**63 - 1
 
@@ -248,6 +251,12 @@ def _ensure_control_config_tables(connection: sqlite3.Connection) -> None:
             CHECK (ranger_count BETWEEN 0 AND 32),
             CHECK (vanguard_count BETWEEN 0 AND 32),
             CHECK (enabled IN (0, 1))
+        );
+        CREATE TABLE IF NOT EXISTS alliance_config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            rally_radius INTEGER NOT NULL,
+            updated_at REAL NOT NULL,
+            CHECK (rally_radius BETWEEN 1 AND 256)
         );
         """
     )
@@ -773,12 +782,48 @@ def _read_control_config(
         FROM expeditions ORDER BY id
         """
     ).fetchall()
+    alliance = connection.execute(
+        "SELECT rally_radius, updated_at FROM alliance_config WHERE id = 1"
+    ).fetchone()
     return {
         "production": dict(production) if production is not None else None,
+        "alliance": (
+            dict(alliance)
+            if alliance is not None
+            else {"rally_radius": DEFAULT_ALLIANCE_RALLY_RADIUS, "updated_at": None}
+        ),
         "expeditions": [
             {**dict(row), "enabled": bool(row["enabled"])} for row in expeditions
         ],
     }
+
+
+def save_alliance_config(
+    path: Path,
+    *,
+    rally_radius: int,
+) -> dict[str, object]:
+    if isinstance(rally_radius, bool) or not isinstance(rally_radius, int):
+        raise ValueError("alliance rally radius must be an integer")
+    if not MIN_ALLIANCE_RALLY_RADIUS <= rally_radius <= MAX_ALLIANCE_RALLY_RADIUS:
+        raise ValueError(
+            "alliance rally radius must be between "
+            f"{MIN_ALLIANCE_RALLY_RADIUS} and {MAX_ALLIANCE_RALLY_RADIUS}"
+        )
+    updated_at = time.time()
+    with closing(_connect(path)) as connection:
+        _ensure_control_config_tables(connection)
+        connection.execute(
+            """
+            INSERT INTO alliance_config VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                rally_radius=excluded.rally_radius,
+                updated_at=excluded.updated_at
+            """,
+            (rally_radius, updated_at),
+        )
+        connection.commit()
+    return {"rally_radius": rally_radius, "updated_at": updated_at}
 
 
 def read_control_config(path: Path) -> dict[str, object]:

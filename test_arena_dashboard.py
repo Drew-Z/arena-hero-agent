@@ -26,6 +26,7 @@ from arena_history import (
     read_overview,
     read_control_config,
     save_expedition,
+    save_alliance_config,
     save_production_config,
 )
 
@@ -379,12 +380,21 @@ class HistoryTests(unittest.TestCase):
                 target=(12, -8),
                 enabled=True,
             )
+            save_alliance_config(path, rally_radius=24)
 
             config = read_control_config(path)
 
             self.assertEqual(config["production"]["ranger_weight"], 2)
+            self.assertEqual(config["alliance"]["rally_radius"], 24)
             self.assertEqual(config["expeditions"][0]["name"], "strike-1")
             self.assertTrue(config["expeditions"][0]["enabled"])
+
+    def test_alliance_config_defaults_to_twelve_and_validates_range(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            self.assertEqual(read_control_config(path)["alliance"]["rally_radius"], 12)
+            with self.assertRaisesRegex(ValueError, "between 1 and 256"):
+                save_alliance_config(path, rally_radius=0)
 
     def test_history_limit_removes_old_snapshots_and_core_sightings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -523,6 +533,42 @@ class DashboardTests(unittest.TestCase):
                 cancelled = json.loads(response.read())
                 self.assertEqual(response.status, 200)
                 self.assertEqual(cancelled["status"], "CANCELLED")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_alliance_config_endpoint_updates_rally_radius(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            static = root / "dashboard"
+            static.mkdir()
+            app = DashboardApplication(
+                history_db=root / "history.sqlite3",
+                static_root=static,
+            )
+            server = DashboardServer(("127.0.0.1", 0), app)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                connection = http.client.HTTPConnection(*server.server_address)
+                connection.request(
+                    "POST",
+                    "/api/alliance-config",
+                    body=json.dumps({"rally_radius": 24}),
+                    headers={"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                payload = json.loads(response.read())
+
+                self.assertEqual(response.status, 201)
+                self.assertEqual(payload["rally_radius"], 24)
+                self.assertEqual(
+                    read_control_config(root / "history.sqlite3")["alliance"][
+                        "rally_radius"
+                    ],
+                    24,
+                )
             finally:
                 server.shutdown()
                 server.server_close()

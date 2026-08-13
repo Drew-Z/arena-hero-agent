@@ -1889,6 +1889,7 @@ class CoreFarmer:
         self.allied_usernames: set[str] = set()
         self.allied_occupied_cells: set[Position] = set()
         self.alliance_leader: AlliancePeer | None = None
+        self.alliance_rally_radius = ALLY_CORE_RALLY_RADIUS
         self.alliance_turn_tick: int | None = None
         self.compatibility_hold = False
         self.known_obstacles: set[Position] = set()
@@ -2078,7 +2079,7 @@ class CoreFarmer:
             or core is None
             or leader.account_id == coordinator.account_id
             or leader.core_position is None
-            or _distance(core.position, leader.core_position) <= ALLY_CORE_RALLY_RADIUS
+            or _distance(core.position, leader.core_position) <= self.alliance_rally_radius
         ):
             return None
         return leader.core_position
@@ -5446,13 +5447,13 @@ class CoreFarmer:
             core.position,
             target,
             blocked,
-            target_radius=ALLY_CORE_RALLY_RADIUS,
+            target_radius=self.alliance_rally_radius,
         )
         if not directions and self._clear_core_departure_lane(
             turn,
             context,
             target,
-            target_radius=ALLY_CORE_RALLY_RADIUS,
+            target_radius=self.alliance_rally_radius,
         ):
             blocked = self._core_blocked_cells(turn, context) | set(
                 context.danger_cells
@@ -5461,7 +5462,7 @@ class CoreFarmer:
                 core.position,
                 target,
                 blocked,
-                target_radius=ALLY_CORE_RALLY_RADIUS,
+                target_radius=self.alliance_rally_radius,
             )
         if not directions:
             return False
@@ -6555,6 +6556,12 @@ def play(
                     }
                     if isinstance(production, Mapping)
                     else None
+                )
+                alliance_config = control_config.get("alliance")
+                tactic.alliance_rally_radius = (
+                    int(alliance_config["rally_radius"])
+                    if isinstance(alliance_config, Mapping)
+                    else ALLY_CORE_RALLY_RADIUS
                 )
                 tactic.manual_core_order_active = any(
                     str(order.get("unit_type")) == "CORE"

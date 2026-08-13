@@ -23,6 +23,7 @@ from arena_history import (
     read_kill_stats,
     read_overview,
     save_expedition,
+    save_alliance_config,
     save_production_config,
 )
 
@@ -311,7 +312,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path not in {"/api/orders", "/api/control-config", "/api/expeditions"}:
+        if path not in {
+            "/api/orders",
+            "/api/control-config",
+            "/api/alliance-config",
+            "/api/expeditions",
+        }:
             self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
             return
         try:
@@ -335,6 +341,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     worker_weight=payload.get("worker_weight"),
                     vanguard_weight=payload.get("vanguard_weight"),
                     ranger_weight=payload.get("ranger_weight"),
+                )
+            elif path == "/api/alliance-config":
+                result = save_alliance_config(
+                    self.server.app.history_db,
+                    rally_radius=payload.get("rally_radius"),
                 )
             else:
                 result = save_expedition(
