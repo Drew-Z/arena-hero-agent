@@ -1711,7 +1711,7 @@ class CoreFarmerTests(unittest.TestCase):
             {"type": "MOVE", "direction": "LEFT"},
         )
 
-    def test_cargo_worker_cancels_moving_core_for_delivery(self) -> None:
+    def test_cargo_worker_waits_while_moving_core_finishes(self) -> None:
         queued = plan(
             make_turn(
                 core_state="MOVING",
@@ -1720,7 +1720,7 @@ class CoreFarmerTests(unittest.TestCase):
             )
         )
         self.assertEqual(queued["unit_actions"][WORKER_1]["type"], "WAIT")
-        self.assertEqual(queued["core_action"]["type"], "CANCEL_MOVE")
+        self.assertNotIn("core_action", queued)
 
     def test_defender_vacates_core_for_cargo_despite_visible_far_worker(self) -> None:
         queued = plan(
@@ -2271,7 +2271,7 @@ class CoreFarmerTests(unittest.TestCase):
         )
         self.assertNotIn("core_action", queued)
 
-    def test_committed_retreat_still_cancels_cargo_on_core(self) -> None:
+    def test_committed_retreat_finishes_with_cargo_on_core(self) -> None:
         queued = plan(
             make_turn(
                 core_state="MOVING",
@@ -2282,7 +2282,33 @@ class CoreFarmerTests(unittest.TestCase):
                 units=[unit(WORKER_1, "WORKER", (0, 0), cargo=1)],
             )
         )
-        self.assertEqual(queued["core_action"]["type"], "CANCEL_MOVE")
+        self.assertNotIn("core_action", queued)
+
+    def test_newly_started_retreat_finishes_with_cargo_on_core(self) -> None:
+        queued = plan(
+            make_turn(
+                core_state="MOVING",
+                move_direction="LEFT",
+                move_progress=1,
+                move_destination=(-1, 0),
+                beacon_position=(5, 0),
+                units=[unit(WORKER_1, "WORKER", (0, 0), cargo=1)],
+            )
+        )
+        self.assertNotIn("core_action", queued)
+
+    def test_newly_started_retreat_finishes_with_nearby_cargo(self) -> None:
+        queued = plan(
+            make_turn(
+                core_state="MOVING",
+                move_direction="LEFT",
+                move_progress=1,
+                move_destination=(-1, 0),
+                beacon_position=(5, 0),
+                units=[unit(WORKER_1, "WORKER", (1, 0), cargo=1)],
+            )
+        )
+        self.assertNotIn("core_action", queued)
 
     def test_improving_evade_keeps_moving_despite_cargo_on_core(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="retreat")

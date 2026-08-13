@@ -6166,15 +6166,6 @@ class CoreFarmer:
 
         move_progress = core.view.move_progress or 0
         move_committed = move_progress >= CORE_MOVE_COMMIT_PROGRESS
-        cargo_on_core = any(
-            worker.cargo > 0 and worker.position == core.position
-            for worker in turn.workers
-        )
-        if cargo_on_core or (
-            not move_committed and self._should_wait_for_cargo(turn, context)
-        ):
-            self.last_core_cancel_reason = "CARGO_DELIVERY"
-            return True
 
         cancel_for_beacon = (
             not move_committed
