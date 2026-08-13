@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import math
 import threading
 import time
 from http import HTTPStatus
@@ -29,6 +30,7 @@ from arena_history import (
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_BASE_URL = "https://api.arenahero.io"
+DEFAULT_ALLIANCE_STALE_SECONDS = 60.0
 LEADERBOARD_KEYS = (
     "beacon_ticks_held",
     "damage_dealt",
@@ -76,13 +78,96 @@ class DashboardApplication:
         history_db: Path,
         static_root: Path,
         base_url: str = DEFAULT_BASE_URL,
+        alliance_directory: Path | None = None,
+        alliance_account_id: str | None = None,
+        alliance_stale_seconds: float = DEFAULT_ALLIANCE_STALE_SECONDS,
     ) -> None:
         self.history_db = history_db
         self.static_root = static_root.resolve()
         self.base_url = base_url.rstrip("/")
+        self.alliance_directory = alliance_directory
+        self.alliance_account_id = alliance_account_id
+        self.alliance_stale_seconds = alliance_stale_seconds
         self._leaderboard_lock = threading.Lock()
         self._leaderboard_at = 0.0
         self._leaderboard: dict[str, list[dict[str, object]]] | None = None
+
+    def alliance_objects(self) -> list[dict[str, object]]:
+        if self.alliance_directory is None or self.alliance_account_id is None:
+            return []
+        now = time.time()
+        objects: list[dict[str, object]] = []
+        try:
+            paths = tuple(self.alliance_directory.glob("*.json"))
+        except OSError:
+            return []
+        for path in paths:
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                account_id = str(value["account_id"])
+                updated_at = float(value["updated_at"])
+                if (
+                    account_id == self.alliance_account_id
+                    or not math.isfinite(updated_at)
+                    or abs(now - updated_at) > self.alliance_stale_seconds
+                ):
+                    continue
+                username = str(value.get("username", ""))
+                core_id = value.get("core_id")
+                core_position = value.get("core_position")
+                if (
+                    isinstance(core_id, str)
+                    and isinstance(core_position, list)
+                    and len(core_position) == 2
+                    and all(isinstance(item, int) for item in core_position)
+                ):
+                    objects.append(
+                        {
+                            "kind": "CORE",
+                            "id": core_id,
+                            "position": core_position,
+                            "owner_username": username,
+                            "alliance_account_id": account_id,
+                        }
+                    )
+                units = value.get("units", [])
+                if isinstance(units, list):
+                    for unit in units:
+                        if not isinstance(unit, dict):
+                            continue
+                        unit_id = unit.get("id")
+                        position = unit.get("position")
+                        unit_type = unit.get("unit_type")
+                        if (
+                            not isinstance(unit_id, str)
+                            or not isinstance(position, list)
+                            or len(position) != 2
+                            or not all(isinstance(item, int) for item in position)
+                            or unit_type not in {"WORKER", "VANGUARD", "RANGER"}
+                        ):
+                            continue
+                        objects.append(
+                            {
+                                "kind": "UNIT",
+                                "id": unit_id,
+                                "position": position,
+                                "unit_type": unit_type,
+                                "hp": unit.get("hp"),
+                                "cargo": unit.get("cargo", 0),
+                                "owner_username": username,
+                                "alliance_account_id": account_id,
+                            }
+                        )
+            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+                continue
+        return sorted(
+            objects,
+            key=lambda item: (
+                str(item["alliance_account_id"]),
+                0 if item["kind"] == "CORE" else 1,
+                str(item["id"]),
+            ),
+        )
 
     def leaderboard(self) -> dict[str, object]:
         now = time.monotonic()
@@ -146,14 +231,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
                 return
             include_history = values.get("history", ["1"])[0] != "0"
-            self._send_json(
-                read_overview(
+            overview = read_overview(
                     self.server.app.history_db,
                     tick=tick,
                     since_tick=since_tick,
                     include_history=include_history,
                 )
-            )
+            overview["alliance_objects"] = self.server.app.alliance_objects()
+            self._send_json(overview)
             return
         if parsed.path == "/api/leaderboard":
             self._send_json(self.server.app.leaderboard())
@@ -295,6 +380,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    parser.add_argument("--alliance-directory", type=Path)
+    parser.add_argument("--alliance-account-id")
+    parser.add_argument(
+        "--alliance-stale-seconds",
+        type=float,
+        default=DEFAULT_ALLIANCE_STALE_SECONDS,
+    )
     parser.add_argument(
         "--static-root",
         type=Path,
@@ -307,10 +399,17 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if not 1 <= args.port <= 65535:
         raise SystemExit("dashboard port must be between 1 and 65535")
+    if not math.isfinite(args.alliance_stale_seconds) or args.alliance_stale_seconds <= 0:
+        raise SystemExit("alliance stale seconds must be finite and positive")
+    if (args.alliance_directory is None) != (args.alliance_account_id is None):
+        raise SystemExit("alliance directory and account ID must be configured together")
     app = DashboardApplication(
         history_db=args.history_db,
         static_root=args.static_root,
         base_url=args.base_url,
+        alliance_directory=args.alliance_directory,
+        alliance_account_id=args.alliance_account_id,
+        alliance_stale_seconds=args.alliance_stale_seconds,
     )
     if not app.static_root.is_dir():
         raise SystemExit(f"dashboard static directory is missing: {app.static_root}")
