@@ -30,6 +30,7 @@ const ui = {
   orderX: document.querySelector("#order-x"),
   orderY: document.querySelector("#order-y"),
   cursorPosition: document.querySelector("#cursor-position"),
+  hoverTooltip: document.querySelector("#hover-tooltip"),
   productionForm: document.querySelector("#production-form"),
   productionStatus: document.querySelector("#production-status"),
   allianceForm: document.querySelector("#alliance-form"),
@@ -82,6 +83,32 @@ const state = {
 };
 
 let drawFrame = 0;
+//悬停计时相关变量
+let hoverTimer = null;
+let currentHoverCell = null;
+const HOVER_DELAY = 1000; // 悬停触发延迟（单位：毫秒，可根据需求调整）
+
+function clearHover() {
+  if (hoverTimer) {
+    clearTimeout(hoverTimer);
+    hoverTimer = null;
+  }
+  currentHoverCell = null;
+  if (ui.hoverTooltip) {
+    ui.hoverTooltip.classList.add("hidden");
+  }
+}
+
+function showHoverTooltip(x, y) {
+  if (!ui.hoverTooltip) return;
+  // 计算方格在 Canvas 上的屏幕坐标
+  const [sx, sy] = screenPosition([x, y]);
+  
+  ui.hoverTooltip.textContent = `坐标: (${x}, ${y})`;
+  ui.hoverTooltip.style.left = `${sx}px`;
+  ui.hoverTooltip.style.top = `${sy}px`;
+  ui.hoverTooltip.classList.remove("hidden");
+}
 
 function resizeCanvas() {
   const ratio = Math.max(1, window.devicePixelRatio || 1);
@@ -771,12 +798,16 @@ function setPanel(name) {
 }
 
 canvas.addEventListener("pointerdown", (event) => {
+  clearHover(); 
   state.dragging = true;
   state.pointer = [event.clientX, event.clientY];
   state.pointerStart = [event.clientX, event.clientY];
   canvas.classList.add("dragging");
   canvas.setPointerCapture(event.pointerId);
 });
+canvas.addEventListener("pointerleave", () => {
+  clearHover();
+})
 canvas.addEventListener("pointermove", (event) => {
   if (!state.dragging) return;
   state.view.x -= (event.clientX - state.pointer[0]) / state.view.scale;
@@ -806,6 +837,7 @@ canvas.addEventListener("pointerup", (event) => {
   }
 });
 canvas.addEventListener("wheel", (event) => {
+  clearHover(); 
   event.preventDefault();
   state.view.scale = Math.max(1.5, Math.min(32, state.view.scale * (event.deltaY < 0 ? 1.14 : 0.88)));
   updateMetrics();
@@ -898,6 +930,19 @@ ui.orders.addEventListener("click", async (event) => {
 canvas.addEventListener("pointermove", (event) => {
   const [x, y] = worldPosition(event.clientX, event.clientY);
   ui.cursorPosition.textContent = `x ${x} · y ${y}`;
+  if (state.dragging) {
+    clearHover();
+    return;
+  }
+
+  if (!currentHoverCell || currentHoverCell[0] !== x || currentHoverCell[1] !== y) {
+    clearHover(); 
+    currentHoverCell = [x, y];
+    
+    hoverTimer = setTimeout(() => {
+      showHoverTooltip(x, y);
+    }, HOVER_DELAY);
+  }
 });
 
 ui.productionForm.addEventListener("submit", async (event) => {
