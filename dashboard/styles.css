@@ -252,7 +252,45 @@ button:focus-visible, input:focus-visible, canvas:focus-visible { outline: 2px s
 .section-collapsed + #expedition-list {
   display: none !important;
 }
+/* 地图工具栏分割线与兵种筛选按钮组 */
+.toolbar-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  margin: 0 3px;
+}
 
+.unit-filter-group {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: #0c1114;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+
+.unit-filter-btn {
+  height: 24px;
+  padding: 0 7px;
+  font-size: 11px;
+  color: #9ba8b1;
+  background: transparent;
+  border: 0;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.unit-filter-btn:hover {
+  background: #192127;
+  color: #edf4f7;
+}
+
+.unit-filter-btn.active {
+  background: var(--cyan);
+  color: #071014;
+  font-weight: 700;
+}
 @media (max-width: 1050px) {
   :root { --panel-width: 280px; }
   .metrics span:nth-child(4), .metrics span:nth-child(5) { display: none; }

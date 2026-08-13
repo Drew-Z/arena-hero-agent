@@ -40,6 +40,13 @@
         <label><input type="checkbox" data-map-layer="resources" checked> 资源</label>
         <label><input type="checkbox" data-map-layer="history" checked> 历史</label>
         <label><input type="checkbox" data-map-layer="routes"> 路线</label>
+        <div class="toolbar-divider"></div>
+		  <div class="unit-filter-group" role="group" aria-label="兵种筛选">
+			<button type="button" class="unit-filter-btn active" data-unit-filter="ALL">全部</button>
+			<button type="button" class="unit-filter-btn" data-unit-filter="WORKER">工兵 W</button>
+			<button type="button" class="unit-filter-btn" data-unit-filter="VANGUARD">先锋 V</button>
+			<button type="button" class="unit-filter-btn" data-unit-filter="RANGER">游侠 R</button>
+		  </div>
       </div>
       <div class="legend" aria-label="地图图例">
         <span><i class="swatch explored"></i>已探索</span>

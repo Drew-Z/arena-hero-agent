@@ -80,6 +80,7 @@ const state = {
   pickMode: null,
   viewport: { width: 1, height: 1 },
   mapIndex: Object.fromEntries(MAP_LAYERS.map((name) => [name, new Map()])),
+  unitFilter: "ALL",
 };
 
 let drawFrame = 0;
@@ -110,6 +111,14 @@ function showHoverTooltip(x, y) {
   ui.hoverTooltip.classList.remove("hidden");
 }
 
+function shouldDrawObject(item) {
+  // 核心 CORE 永远显示
+  if (item.kind === "CORE") return true;
+  // 全部显示模式
+  if (state.unitFilter === "ALL") return true;
+  // 按指定兵种过滤
+  return item.kind === "UNIT" && item.unit_type === state.unitFilter;
+}
 function selectUnitInForm(unit, isMultiSelect = false) {
   const typeSelect = document.querySelector("#order-unit-type");
   const unitType = unit.kind === "CORE" ? "CORE" : unit.unit_type;
@@ -435,10 +444,12 @@ function draw() {
   }
   for (const item of objects) {
     if (allianceIds.has(item.id) || item.relation === "ALLY") continue;
+    if (!shouldDrawObject(item)) continue; //过滤掉非当前兵种的单位
     if (item.kind === "CORE") drawCore(item, item.controlled ? "friendly" : "enemy");
     if (item.kind === "UNIT") drawUnit(item, item.controlled ? "friendly" : "enemy");
   }
   for (const item of allianceObjects) {
+    if (!shouldDrawObject(item)) continue; //过滤盟友非当前兵种单位
     if (item.kind === "CORE") drawCore(item, "ally");
     if (item.kind === "UNIT") drawUnit(item, "ally");
   }
@@ -899,6 +910,7 @@ canvas.addEventListener("pointerup", (event) => {
     const objects = state.overview?.state?.objects || [];
     const clickedUnit = objects.find((item) =>
       item.controlled &&
+      shouldDrawObject(item) &&
       ["UNIT", "CORE"].includes(item.kind) &&
       Math.hypot(item.position[0] - worldPos[0], item.position[1] - worldPos[1]) <= 1.2
     );
@@ -938,6 +950,16 @@ canvas.addEventListener("wheel", (event) => {
   scheduleDraw();
 }, { passive: false });
 
+// 兵种筛选按钮切换监听
+document.querySelectorAll("[data-unit-filter]").forEach((button) => {
+  button.addEventListener("click", () => {
+    state.unitFilter = button.dataset.unitFilter;
+    document.querySelectorAll("[data-unit-filter]").forEach((btn) => {
+      btn.classList.toggle("active", btn === button);
+    });
+    draw();
+  });
+});
 document.querySelector("#previous-tick").addEventListener("click", () => selectIndex(state.selectedIndex - 1));
 document.querySelector("#next-tick").addEventListener("click", () => selectIndex(state.selectedIndex + 1));
 document.querySelector("#toggle-play").addEventListener("click", togglePlay);
