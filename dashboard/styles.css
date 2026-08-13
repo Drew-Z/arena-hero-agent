@@ -199,6 +199,60 @@ button:focus-visible, input:focus-visible, canvas:focus-visible { outline: 2px s
   display: none;
 }
 
+
+.control-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 14px;
+  background: #0b1013;
+  border-bottom: 1px solid var(--border);
+}
+
+.control-toolbar button {
+  height: 26px;
+  padding: 0 10px;
+  font-size: 11px;
+}
+
+
+.config-form h3, .order-form h3, .control-section h3 {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.order-form h3 {
+  grid-column: 1 / -1;
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: #edf4f7;
+}
+
+.config-form h3::after, .order-form h3::after, .control-section h3::after {
+  content: "▾";
+  font-size: 12px;
+  color: #77858e;
+  transition: transform 0.2s ease;
+}
+
+
+.section-collapsed h3::after {
+  transform: rotate(-90deg);
+}
+
+
+.config-form.section-collapsed > *:not(h3),
+.order-form.section-collapsed > *:not(h3),
+.control-section.section-collapsed > *:not(h3) {
+  display: none !important;
+}
+
+.section-collapsed + #expedition-list {
+  display: none !important;
+}
+
 @media (max-width: 1050px) {
   :root { --panel-width: 280px; }
   .metrics span:nth-child(4), .metrics span:nth-child(5) { display: none; }

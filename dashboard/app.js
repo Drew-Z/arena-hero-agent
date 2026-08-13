@@ -141,6 +141,11 @@ function selectUnitInForm(unit, isMultiSelect = false) {
 
   setPanel("control");
   setTargetPicking(true, "order");
+  
+  const orderForm = document.querySelector("#order-form");
+  if (orderForm) {
+    orderForm.classList.remove("section-collapsed");
+  }
 
   if (checkedBoxes.length > 0) {
     ui.orderStatus.textContent = `已选中 ${checkedBoxes.length} 个 ${unitType}（按住 Ctrl 可继续多选），请点击地图标记目的地`;
@@ -1131,3 +1136,33 @@ refreshControl();
 setInterval(refreshTicks, 5000);
 setInterval(refreshLeaderboard, 15000);
 setInterval(refreshControl, 5000);
+
+let isAllCollapsed = false;
+
+// 折叠 / 展开指定栏目
+function toggleSection(element, forceState) {
+  if (!element) return;
+  if (typeof forceState === "boolean") {
+    element.classList.toggle("section-collapsed", forceState);
+  } else {
+    element.classList.toggle("section-collapsed");
+  }
+}
+
+// “全部折叠 / 展开” 按钮事件
+document.querySelector("#toggle-all-control")?.addEventListener("click", () => {
+  isAllCollapsed = !isAllCollapsed;
+  const sections = document.querySelectorAll("#control-panel .config-form, #control-panel .order-form, #control-panel .control-section");
+  sections.forEach((sec) => toggleSection(sec, isAllCollapsed));
+  document.querySelector("#toggle-all-control").textContent = isAllCollapsed ? "全部展开" : "全部折叠";
+});
+
+// 点击单个栏目标题进行折叠/展开
+document.querySelector("#control-panel")?.addEventListener("click", (event) => {
+  const header = event.target.closest("h3");
+  if (!header) return;
+  const section = header.closest(".config-form, .order-form, .control-section");
+  if (section) {
+    toggleSection(section);
+  }
+});

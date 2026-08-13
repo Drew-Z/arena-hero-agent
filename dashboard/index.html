@@ -75,6 +75,9 @@
         <ol id="ranking-list" class="ranking-list"></ol>
       </section>
       <section id="control-panel" class="panel-view hidden" role="tabpanel">
+		<div class="control-toolbar">
+			<button id="toggle-all-control" type="button" class="secondary-button">全部折叠</button>
+		</div>
         <form id="production-form" class="config-form">
           <h3>生产比例</h3>
           <label>Worker <input id="production-worker" type="number" min="0" max="100" value="4" required></label>
@@ -98,6 +101,7 @@
         </form>
         <ol id="expedition-list" class="event-list"></ol>
         <form id="order-form" class="order-form">
+        <h3>手动派遣</h3>
           <label>兵种
             <select id="order-unit-type">
               <option value="CORE">核心</option>
