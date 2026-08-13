@@ -454,6 +454,17 @@ class HistoryTests(unittest.TestCase):
 
 
 class DashboardTests(unittest.TestCase):
+    def test_dispatch_ui_supports_all_and_core_distance_selection(self) -> None:
+        dashboard_root = Path(__file__).with_name("dashboard")
+        html = (dashboard_root / "index.html").read_text(encoding="utf-8")
+        script = (dashboard_root / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('value="DISTANT">远离 Core X 格', html)
+        self.assertIn('value="ALL">全部', html)
+        self.assertIn('id="order-min-distance"', html)
+        self.assertIn('coreDistance >= minDistance', script)
+        self.assertIn('selectionMode === "ALL"', script)
+
     def test_alliance_objects_exclude_local_account_and_reject_stale_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
