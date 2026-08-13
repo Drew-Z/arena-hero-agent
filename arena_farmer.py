@@ -148,6 +148,7 @@ CORE_BULK_CARGO = 3
 CORE_CONGESTED_CARGO = 3
 CORE_DELIVERY_CHAIN_MAX = 8
 CORE_MIGRATION_DELIVERY_BACKLOG = 6
+CORE_MIGRATION_VISIBLE_CARGO = 5
 CORE_MIGRATION_DELIVERY_TICKS = 6
 CORE_EVADE_TRIGGER_DISTANCE = 12
 CORE_EVADE_RELEASE_DISTANCE = CORE_EVADE_TRIGGER_DISTANCE + 2
@@ -5865,8 +5866,18 @@ class CoreFarmer:
         cargo_workers = [worker for worker in turn.workers if worker.cargo > 0]
         if any(worker.position == core.position for worker in cargo_workers):
             return True
+        visible_cargo = sum(
+            position_visible_from(
+                core.position,
+                worker.position,
+                VISION_RADII["CORE"],
+                set(turn.obstacle_cells),
+            )
+            for worker in cargo_workers
+        )
         return (
             len(cargo_workers) >= CORE_MIGRATION_DELIVERY_BACKLOG
+            and visible_cargo >= CORE_MIGRATION_VISIBLE_CARGO
             and 0
             <= turn.tick - self.last_core_move_tick
             <= CORE_MIGRATION_DELIVERY_TICKS

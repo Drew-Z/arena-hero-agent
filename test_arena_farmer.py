@@ -827,7 +827,12 @@ class CoreFarmerTests(unittest.TestCase):
 
     def test_dashboard_core_order_pauses_for_bounded_delivery_window(self) -> None:
         cargo_workers = [
-            unit(identifier, "WORKER", (-10 - index, index), cargo=1)
+            unit(
+                identifier,
+                "WORKER",
+                ((index + 1, 0) if index < 5 else (100, 100)),
+                cargo=1,
+            )
             for index, identifier in enumerate(
                 (WORKER_1, WORKER_2, WORKER_3, WORKER_4, WORKER_5, WORKER_6)
             )
@@ -859,14 +864,45 @@ class CoreFarmerTests(unittest.TestCase):
             {"type": "START_MOVE", "direction": "RIGHT"},
         )
 
+    def test_dashboard_core_order_ignores_distant_cargo_backlog(self) -> None:
+        cargo_workers = [
+            unit(identifier, "WORKER", (100 + index, 100), cargo=1)
+            for index, identifier in enumerate(
+                (WORKER_1, WORKER_2, WORKER_3, WORKER_4, WORKER_5, WORKER_6)
+            )
+        ]
+        tactic = CoreFarmer(worker_target=6, beacon_policy="hold")
+        tactic.last_core_move_tick = 100
+        turn = make_turn(tick=103, units=cargo_workers)
+        tactic.choose_actions(turn)
+        tactic.apply_unit_orders(
+            turn,
+            [
+                {
+                    "id": 15,
+                    "unit_type": "CORE",
+                    "unit_count": 1,
+                    "unit_ids": [CORE_ID],
+                    "target_x": 20,
+                    "target_y": 0,
+                }
+            ],
+        )
+
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+        self.assertEqual(
+            queued["core_action"],
+            {"type": "START_MOVE", "direction": "RIGHT"},
+        )
+
     def test_migration_delivery_window_does_not_reserve_core_for_spawn(self) -> None:
         cargo_workers = [
             unit(WORKER_1, "WORKER", (1, 0), cargo=1),
-            unit(WORKER_2, "WORKER", (4, 0), cargo=1),
-            unit(WORKER_3, "WORKER", (5, 0), cargo=1),
-            unit(WORKER_4, "WORKER", (6, 0), cargo=1),
-            unit(WORKER_5, "WORKER", (7, 0), cargo=1),
-            unit(WORKER_6, "WORKER", (8, 0), cargo=1),
+            unit(WORKER_2, "WORKER", (2, 0), cargo=1),
+            unit(WORKER_3, "WORKER", (3, 0), cargo=1),
+            unit(WORKER_4, "WORKER", (4, 0), cargo=1),
+            unit(WORKER_5, "WORKER", (5, 0), cargo=1),
+            unit(WORKER_6, "WORKER", (100, 100), cargo=1),
         ]
         tactic = CoreFarmer(worker_target=18, beacon_policy="hold")
         tactic.manual_core_order_active = True
@@ -923,7 +959,12 @@ class CoreFarmerTests(unittest.TestCase):
                 )
             )
             cargo_workers = [
-                unit(identifier, "WORKER", (-10 - index, index), cargo=1)
+                unit(
+                    identifier,
+                    "WORKER",
+                    ((index + 1, 0) if index < 5 else (100, 100)),
+                    cargo=1,
+                )
                 for index, identifier in enumerate(
                     (WORKER_1, WORKER_2, WORKER_3, WORKER_4, WORKER_5, WORKER_6)
                 )
