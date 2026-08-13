@@ -20,6 +20,12 @@ The Agent reads credentials in this order:
 | `--heartbeat-file` | none | Write liveness metadata after each accepted Turn. |
 | `--history-db` | `arena_history.sqlite3` | Bounded SQLite history used by the dashboard. |
 | `--stale-turn-timeout-seconds` | `0` | Exit transiently after no accepted Turn; `0` disables. |
+| `--alliance-directory` | none | Shared local directory for multi-account state; enables alliance coordination. |
+| `--alliance-id` | none | Shared alliance name. Required with `--alliance-directory`. |
+| `--alliance-account-id` | none | Stable, non-secret identifier unique to this account. |
+| `--alliance-expected-members` | `1` | Pause autonomous actions until this many same-Turn members are present. |
+| `--alliance-stale-seconds` | `60` | Reject member state older than this many seconds. |
+| `--alliance-barrier-timeout-seconds` | `1` | Maximum same-Turn identity synchronization wait before choosing WAIT. |
 
 The default unattended force is `18 Workers + 14 Vanguards + 16 Rangers = 48`.
 Core capacity therefore reaches 240 resources. Production is staged at
@@ -30,6 +36,25 @@ emergency defense.
 The Core does not migrate for Beacon geometry or routine expansion. Workers
 clear the production cell. Core migration remains available to the survival
 controller when a threat is close enough to justify the slower four-Tick move.
+
+## Multi-account alliance
+
+Trusted local accounts can coordinate through a shared directory. Each Agent
+atomically publishes only its current Tick, population, Core identity and
+position, Unit identities, and update time. API keys are never written to the
+coordination directory.
+
+Fresh members with the same alliance ID are treated as allies: their Core and
+Units are removed from targeting, danger, and pursuit logic. The account with
+the largest population is the deterministic rally leader; ties are resolved by
+the stable account ID. Healthy follower Cores move toward that leader until
+they are within 12 cells. Survival, healing, cargo delivery, and compatibility
+hold take priority over alliance movement.
+
+For fail-safe operation, set `--alliance-expected-members` to the configured
+account count. An Agent chooses WAIT until every member has published identity
+for the same Turn. Stale or malformed state is ignored, preventing an unknown
+object from being trusted after an account disconnects.
 
 ## Dashboard
 

@@ -29,6 +29,7 @@ At 48 living Units, the Core capacity is 240 resources under `max(10, population
 - Only one Vanguard and one Ranger remain as permanent Core guards; the rest attack, pursue visible enemies, or patrol an expanding perimeter.
 - Once population reaches 40, resources reach 30, and the Core is healthy and not threatened, a non-guard Vanguard contests the Champion Beacon.
 - The Core does not migrate for routine expansion or Beacon pressure. Workers clear the production cell; the Core moves only for verified survival threats.
+- Optional local multi-account alliances share non-secret battlefield state, exclude each other from targeting and threat logic, and safely rally smaller accounts' Cores toward the largest account.
 - Arena Hero has no territory-ownership command. "Expansion" here means accumulated vision, outward patrols, enemy removal, and map control.
 
 The tactic targets gameplay rules v0.14 and `arena-hero` SDK 0.2.9. See [strategy](docs/strategy.md), [threat response](docs/threat-response.md), and [configuration](docs/configuration.md).
@@ -42,7 +43,8 @@ Every accepted Turn is stored in a bounded SQLite history. The dashboard provide
 - friendly movement trails and submitted move lines;
 - Tick playback, timeline navigation, pan, and zoom;
 - event feed and public damage, Core-destruction, and Beacon leaderboards.
-- coordinate orders for explicitly selected Worker, Vanguard, or Ranger UUIDs, with cancellation;
+- coordinate orders for an explicitly selected Core, Worker, Vanguard, or Ranger UUID, with cancellation; Core orders use safe routing and alliance-occupied cells remain blocked;
+- Sakura-pink map markers for allied Cores and Units using their latest shared alliance positions;
 - local unit/Core destruction-participation totals, named enemy Core victories, incoming attacks, losses, and confirmed revenge targets from recorded events.
 
 Start it after the Agent has begun writing `arena_history.sqlite3`:

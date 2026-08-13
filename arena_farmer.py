@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import heapq
+import json
 import math
 import os
 import sqlite3
@@ -160,6 +161,9 @@ PROTOCOL_EXIT_CODE = 12
 API_EXIT_CODE = 13
 AGENT_EXIT_CODE = 14
 DEFAULT_STALE_TURN_TIMEOUT_SECONDS = 0.0
+DEFAULT_ALLIANCE_STALE_SECONDS = 60.0
+DEFAULT_ALLIANCE_BARRIER_TIMEOUT_SECONDS = 1.0
+ALLY_CORE_RALLY_RADIUS = 12
 TURN_SKIP_API_ERRORS = frozenset(
     {
         "COMMAND_RATE_LIMITED",
@@ -255,6 +259,7 @@ class MovementContext:
     resource_cells: set[Position]
     enemy_cells: set[Position]
     danger_cells: set[Position]
+    allied_cells: set[Position]
     discouraged_cells: set[Position]
     friendly_counts: Counter[Position]
     reserved_destinations: set[Position]
@@ -311,6 +316,151 @@ class RememberedThreat:
     position: Position
     unit_type: UnitType
     expires_tick: int
+
+
+@dataclass(slots=True, frozen=True)
+class AlliancePeer:
+    account_id: str
+    alliance_id: str
+    username: str
+    tick: int
+    population: int
+    core_id: UUID | None
+    core_position: Position | None
+    unit_ids: frozenset[UUID]
+    unit_positions: frozenset[Position]
+    updated_at: float
+
+
+def _coordination_name(value: str, label: str) -> str:
+    selected = value.strip()
+    if not selected or len(selected) > 64 or any(
+        character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+        for character in selected
+    ):
+        raise ValueError(
+            f"{label} must contain only letters, numbers, underscores, or hyphens"
+        )
+    return selected
+
+
+class AllianceCoordinator:
+    def __init__(
+        self,
+        directory: Path,
+        *,
+        alliance_id: str,
+        account_id: str,
+        expected_members: int = 1,
+        stale_seconds: float = DEFAULT_ALLIANCE_STALE_SECONDS,
+        barrier_timeout_seconds: float = DEFAULT_ALLIANCE_BARRIER_TIMEOUT_SECONDS,
+    ) -> None:
+        if not math.isfinite(stale_seconds) or stale_seconds <= 0:
+            raise ValueError("alliance stale seconds must be finite and positive")
+        if expected_members < 1:
+            raise ValueError("alliance expected members must be positive")
+        if not math.isfinite(barrier_timeout_seconds) or barrier_timeout_seconds < 0:
+            raise ValueError("alliance barrier timeout must be finite and non-negative")
+        self.directory = directory
+        self.alliance_id = _coordination_name(alliance_id, "alliance_id")
+        self.account_id = _coordination_name(account_id, "account_id")
+        self.expected_members = expected_members
+        self.stale_seconds = stale_seconds
+        self.barrier_timeout_seconds = barrier_timeout_seconds
+
+    @property
+    def state_path(self) -> Path:
+        return self.directory / f"{self.account_id}.json"
+
+    def publish(self, turn: Turn) -> None:
+        core = turn.core
+        state = {
+            "version": 1,
+            "alliance_id": self.alliance_id,
+            "account_id": self.account_id,
+            "username": core.owner_username if core is not None else "",
+            "tick": turn.tick,
+            "population": len(turn.units),
+            "core_id": str(core.id) if core is not None else None,
+            "core_position": list(core.position) if core is not None else None,
+            "unit_ids": [str(unit.id) for unit in turn.units],
+            "unit_positions": [list(unit.position) for unit in turn.units],
+            "units": [
+                {
+                    "id": str(unit.id),
+                    "position": list(unit.position),
+                    "unit_type": unit.unit_type.value,
+                    "hp": unit.hp,
+                    "cargo": getattr(unit, "cargo", 0),
+                }
+                for unit in turn.units
+            ],
+            "updated_at": time.time(),
+        }
+        self.directory.mkdir(parents=True, exist_ok=True)
+        temporary = self.directory / (
+            f".{self.account_id}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        try:
+            temporary.write_text(
+                json.dumps(state, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, self.state_path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+    def peers(self, *, now: float | None = None) -> tuple[AlliancePeer, ...]:
+        selected_now = time.time() if now is None else now
+        peers: list[AlliancePeer] = []
+        try:
+            paths = tuple(self.directory.glob("*.json"))
+        except OSError:
+            return ()
+        for path in paths:
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                updated_at = float(raw["updated_at"])
+                if (
+                    raw.get("version") != 1
+                    or raw.get("alliance_id") != self.alliance_id
+                    or selected_now - updated_at > self.stale_seconds
+                    or updated_at - selected_now > self.stale_seconds
+                ):
+                    continue
+                account_id = _coordination_name(str(raw["account_id"]), "account_id")
+                position_raw = raw.get("core_position")
+                core_position = (
+                    (int(position_raw[0]), int(position_raw[1]))
+                    if isinstance(position_raw, list) and len(position_raw) == 2
+                    else None
+                )
+                core_id_raw = raw.get("core_id")
+                peers.append(
+                    AlliancePeer(
+                        account_id=account_id,
+                        alliance_id=self.alliance_id,
+                        username=str(raw.get("username", "")),
+                        tick=int(raw["tick"]),
+                        population=max(0, int(raw["population"])),
+                        core_id=UUID(core_id_raw) if core_id_raw else None,
+                        core_position=core_position,
+                        unit_ids=frozenset(UUID(value) for value in raw.get("unit_ids", ())),
+                        unit_positions=frozenset(
+                            (int(value[0]), int(value[1]))
+                            for value in raw.get("unit_positions", ())
+                            if isinstance(value, list) and len(value) == 2
+                        ),
+                        updated_at=updated_at,
+                    )
+                )
+            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+                continue
+        return tuple(sorted(peers, key=lambda peer: peer.account_id))
 
 
 @dataclass(slots=True, frozen=True)
@@ -887,7 +1037,11 @@ def _queue_move(
 ) -> bool:
     for direction in directions:
         destination = _destination(unit.position, direction)
-        if destination in context.obstacles or destination in context.enemy_cells:
+        if (
+            destination in context.obstacles
+            or destination in context.enemy_cells
+            or destination in context.allied_cells
+        ):
             continue
         if avoid_danger and destination in context.danger_cells:
             continue
@@ -1269,6 +1423,7 @@ def _queue_toward(
     blocked = (
         set(context.obstacles)
         | set(context.enemy_cells)
+        | set(context.allied_cells)
         | set(context.reserved_destinations)
     )
     if avoid_danger:
@@ -1500,6 +1655,7 @@ def _core_attack_priority_ids(
     turn: Turn,
     target: object | None,
     obstacles: set[Position],
+    enemies: Sequence[object] | None = None,
 ) -> set[UUID]:
     visible_target = (
         target.visible_enemy
@@ -1526,7 +1682,7 @@ def _core_attack_priority_ids(
 
     threats = tuple(
         enemy
-        for enemy in turn.visible_enemies
+        for enemy in (turn.visible_enemies if enemies is None else enemies)
         if getattr(enemy, "kind", None) != "CORE"
         and getattr(enemy, "unit_type", None)
         in {UnitType.VANGUARD, UnitType.RANGER}
@@ -1613,10 +1769,11 @@ def _core_target_score(
     turn: Turn,
     enemy_core: object,
     strike_distance: int,
+    enemies: Sequence[object] | None = None,
 ) -> tuple[object, ...]:
     protector_hp = sum(
         enemy.hp
-        for enemy in turn.visible_enemies
+        for enemy in (turn.visible_enemies if enemies is None else enemies)
         if getattr(enemy, "kind") != "CORE"
         and enemy.unit_type in {UnitType.VANGUARD, UnitType.RANGER}
         and _distance(enemy.position, enemy_core.position) <= CORE_PROTECTOR_RADIUS
@@ -1713,6 +1870,7 @@ class CoreFarmer:
         worker_target: int = DEFAULT_WORKER_TARGET,
         beacon_policy: str = DEFAULT_BEACON_POLICY,
         compatibility_marker: Path | None = DEFAULT_COMPATIBILITY_MARKER,
+        alliance_coordinator: AllianceCoordinator | None = None,
     ) -> None:
         if not 1 <= worker_target <= MAX_WORKER_TARGET:
             raise ValueError(
@@ -1723,6 +1881,13 @@ class CoreFarmer:
         self.worker_target = worker_target
         self.beacon_policy = beacon_policy
         self.compatibility_marker = compatibility_marker
+        self.alliance_coordinator = alliance_coordinator
+        self.alliance_peers: tuple[AlliancePeer, ...] = ()
+        self.allied_object_ids: set[UUID] = set()
+        self.allied_usernames: set[str] = set()
+        self.allied_occupied_cells: set[Position] = set()
+        self.alliance_leader: AlliancePeer | None = None
+        self.alliance_turn_tick: int | None = None
         self.compatibility_hold = False
         self.known_obstacles: set[Position] = set()
         self.scout_slots: dict[UUID, int] = {}
@@ -1782,6 +1947,149 @@ class CoreFarmer:
         self.production_weights: dict[UnitType, int] | None = None
         self.expedition_members: dict[int, set[UUID]] = {}
         self.revenge_usernames: set[str] = set()
+
+    def _refresh_alliance(self, turn: Turn) -> None:
+        coordinator = self.alliance_coordinator
+        if coordinator is None:
+            self.alliance_peers = ()
+            self.allied_object_ids.clear()
+            self.allied_usernames.clear()
+            self.allied_occupied_cells.clear()
+            self.alliance_leader = None
+            return
+        try:
+            coordinator.publish(turn)
+            deadline = time.monotonic() + coordinator.barrier_timeout_seconds
+            while True:
+                peers = coordinator.peers()
+                fresh_accounts = {
+                    peer.account_id
+                    for peer in peers
+                    if peer.tick >= turn.tick
+                }
+                if len(fresh_accounts) >= coordinator.expected_members:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.05, remaining))
+        except OSError as exc:
+            print(
+                f"WARNING tick={turn.tick} alliance_coordination_error="
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            peers = ()
+        self.alliance_peers = peers
+        self.alliance_turn_tick = turn.tick
+        self.allied_object_ids = {
+            identifier
+            for peer in peers
+            if peer.account_id != coordinator.account_id
+            for identifier in (
+                *((peer.core_id,) if peer.core_id is not None else ()),
+                *peer.unit_ids,
+            )
+        }
+        self.allied_usernames = {
+            peer.username
+            for peer in peers
+            if peer.account_id != coordinator.account_id and peer.username
+        }
+        self.allied_occupied_cells = {
+            position
+            for peer in peers
+            if peer.account_id != coordinator.account_id
+            for position in (
+                *((peer.core_position,) if peer.core_position is not None else ()),
+                *peer.unit_positions,
+            )
+        }
+        self.allied_occupied_cells.update(
+            enemy.position
+            for enemy in turn.visible_enemies
+            if enemy.id in self.allied_object_ids
+            or (
+                getattr(enemy, "kind", None) == "CORE"
+                and getattr(enemy, "owner_username", "") in self.allied_usernames
+            )
+        )
+        self.enemy_core_sightings = {
+            identifier: sighting
+            for identifier, sighting in self.enemy_core_sightings.items()
+            if identifier not in self.allied_object_ids
+        }
+        self.enemy_unit_sightings = {
+            identifier: sighting
+            for identifier, sighting in self.enemy_unit_sightings.items()
+            if identifier not in self.allied_object_ids
+        }
+        self.enemy_unit_motion = {
+            identifier: motion
+            for identifier, motion in self.enemy_unit_motion.items()
+            if identifier not in self.allied_object_ids
+        }
+        self.stationary_core_memory = {
+            identifier: sighting
+            for identifier, sighting in self.stationary_core_memory.items()
+            if identifier not in self.allied_object_ids
+        }
+        self.active_enemy_ids.difference_update(self.allied_object_ids)
+        self.preemptive_evade_enemy_ids.difference_update(self.allied_object_ids)
+        self.pursuing_enemy_ids.difference_update(self.allied_object_ids)
+        for identifier in self.allied_object_ids:
+            self.recent_attack_threats.pop(identifier, None)
+        if self.isolated_core_target_id in self.allied_object_ids:
+            self._release_core_raid(forget_position=True)
+        if self.stationary_unit_target_id in self.allied_object_ids:
+            self.stationary_unit_target_id = None
+        viable = tuple(peer for peer in peers if peer.core_position is not None)
+        self.alliance_leader = (
+            min(viable, key=lambda peer: (-peer.population, peer.account_id))
+            if viable
+            else None
+        )
+
+    def _hostile_enemies(self, turn: Turn) -> tuple[object, ...]:
+        return tuple(
+            enemy
+            for enemy in turn.visible_enemies
+            if enemy.id not in self.allied_object_ids
+            and (
+                getattr(enemy, "kind", None) != "CORE"
+                or getattr(enemy, "owner_username", "") not in self.allied_usernames
+            )
+        )
+
+    def _alliance_rally_target(self, turn: Turn) -> Position | None:
+        coordinator = self.alliance_coordinator
+        leader = self.alliance_leader
+        core = turn.core
+        if (
+            coordinator is None
+            or leader is None
+            or core is None
+            or leader.account_id == coordinator.account_id
+            or leader.core_position is None
+            or _distance(core.position, leader.core_position) <= ALLY_CORE_RALLY_RADIUS
+        ):
+            return None
+        return leader.core_position
+
+    @property
+    def alliance_ready(self) -> bool:
+        coordinator = self.alliance_coordinator
+        if coordinator is None:
+            return True
+        if self.alliance_turn_tick is None:
+            return False
+        fresh_accounts = {
+            peer.account_id
+            for peer in self.alliance_peers
+            if peer.tick >= self.alliance_turn_tick
+        }
+        return len(fresh_accounts) >= coordinator.expected_members
 
     @property
     def recovery_mode(self) -> bool:
@@ -1889,7 +2197,7 @@ class CoreFarmer:
 
         visible_combat_enemies = tuple(
             enemy
-            for enemy in turn.visible_enemies
+            for enemy in self._hostile_enemies(turn)
             if getattr(enemy, "kind") != "CORE"
             and enemy.unit_type in {UnitType.VANGUARD, UnitType.RANGER}
         )
@@ -2194,12 +2502,12 @@ class CoreFarmer:
     def _update_enemy_awareness(self, turn: Turn) -> None:
         visible_cores = {
             enemy.id: enemy
-            for enemy in turn.visible_enemies
+            for enemy in self._hostile_enemies(turn)
             if getattr(enemy, "kind") == "CORE"
         }
         visible_units = {
             enemy.id: enemy
-            for enemy in turn.visible_enemies
+            for enemy in self._hostile_enemies(turn)
             if getattr(enemy, "kind") != "CORE"
         }
         prior_motion = dict(self.enemy_unit_motion)
@@ -2366,6 +2674,7 @@ class CoreFarmer:
             event
             for event in turn.events
             if not core_respawned
+            and getattr(event, "actor_id", None) not in self.allied_object_ids
             and event.reason_code == "ATTACK"
             and event.event_type in {"CORE_DAMAGED", "UNIT_DAMAGED"}
         )
@@ -2542,7 +2851,7 @@ class CoreFarmer:
             )
         visible_cores = {
             enemy.id: enemy
-            for enemy in turn.visible_enemies
+            for enemy in self._hostile_enemies(turn)
             if getattr(enemy, "kind") == "CORE"
         }
 
@@ -2615,7 +2924,12 @@ class CoreFarmer:
                 (
                     str(getattr(enemy_core, "owner_username", "")).casefold()
                     not in self.revenge_usernames,
-                    _core_target_score(turn, enemy_core, strike_distance),
+                    _core_target_score(
+                        turn,
+                        enemy_core,
+                        strike_distance,
+                        self._hostile_enemies(turn),
+                    ),
                     enemy_core,
                 )
             )
@@ -2663,7 +2977,7 @@ class CoreFarmer:
     def _stationary_enemy_units(self, turn: Turn) -> tuple[object, ...]:
         return tuple(
             enemy
-            for enemy in turn.visible_enemies
+            for enemy in self._hostile_enemies(turn)
             if getattr(enemy, "kind") != "CORE"
         )
 
@@ -2756,7 +3070,7 @@ class CoreFarmer:
         nearest_threat = min(
             (
                 _distance(turn.core.position, enemy.position)
-                for enemy in turn.visible_enemies
+                for enemy in self._hostile_enemies(turn)
             ),
             default=None,
         )
@@ -3240,6 +3554,15 @@ class CoreFarmer:
 
     def choose_actions(self, turn: Turn) -> None:
         turn.clear()
+        self._refresh_alliance(turn)
+        if not self.alliance_ready:
+            if turn.core is not None:
+                turn.core.wait()
+            for unit in turn.units:
+                unit.wait()
+            self.threat_assessment = ThreatAssessment()
+            self.combat_pressure_active = False
+            return
         if turn.core is None:
             self._refresh_threat_assessment(turn)
             return
@@ -3276,7 +3599,7 @@ class CoreFarmer:
             turn,
             isolated_core_target,
         )
-        enemies = tuple(turn.visible_enemies)
+        enemies = self._hostile_enemies(turn)
         mobile_enemies = tuple(
             enemy
             for enemy in enemies
@@ -3308,11 +3631,21 @@ class CoreFarmer:
         }
         friendly_counts = Counter(unit.position for unit in turn.units)
         friendly_counts[core.position] += 1
+        friendly_counts.update(
+            enemy.position
+            for enemy in turn.visible_enemies
+            if enemy.id in self.allied_object_ids
+            or (
+                getattr(enemy, "kind", None) == "CORE"
+                and getattr(enemy, "owner_username", "") in self.allied_usernames
+            )
+        )
         context = MovementContext(
             obstacles=set(self.known_obstacles),
             resource_cells=set(turn.resource_cells),
             enemy_cells=enemy_cells,
             danger_cells=danger_cells,
+            allied_cells=set(self.allied_occupied_cells),
             discouraged_cells=discouraged_core_cells,
             friendly_counts=friendly_counts,
             reserved_destinations=set(),
@@ -3608,10 +3941,10 @@ class CoreFarmer:
         orders: Sequence[Mapping[str, object]],
     ) -> tuple[int, ...]:
         """Apply dashboard orders after the autonomous plan is complete."""
-        if turn.core is None or not orders:
+        if turn.core is None or not orders or not self.alliance_ready:
             self.manual_order_ids = ()
             return ()
-        enemies = tuple(turn.visible_enemies)
+        enemies = self._hostile_enemies(turn)
         context = MovementContext(
             obstacles=set(self.known_obstacles) | set(turn.obstacle_cells),
             resource_cells=set(turn.resource_cells),
@@ -3620,8 +3953,19 @@ class CoreFarmer:
                 enemies,
                 self.known_obstacles | set(turn.obstacle_cells),
             ),
+            allied_cells=set(self.allied_occupied_cells),
             discouraged_cells=set(),
-            friendly_counts=Counter(unit.position for unit in turn.units),
+            friendly_counts=Counter(unit.position for unit in turn.units)
+            + Counter(
+                enemy.position
+                for enemy in turn.visible_enemies
+                if enemy.id in self.allied_object_ids
+                or (
+                    getattr(enemy, "kind", None) == "CORE"
+                    and getattr(enemy, "owner_username", "")
+                    in self.allied_usernames
+                )
+            ),
             reserved_destinations=set(),
             core_position=turn.core.position,
         )
@@ -3631,6 +3975,7 @@ class CoreFarmer:
             "RANGER": list(turn.rangers),
         }
         claimed: set[UUID] = set()
+        core_claimed = False
         completed: list[int] = []
         active_ids: list[int] = []
         for order in orders:
@@ -3639,6 +3984,52 @@ class CoreFarmer:
             target = (int(order["target_x"]), int(order["target_y"]))
             count = int(order["unit_count"])
             requested_ids = tuple(UUID(str(value)) for value in order.get("unit_ids", ()))
+            if unit_type == "CORE":
+                core = turn.core
+                if (
+                    core_claimed
+                    or count != 1
+                    or requested_ids != (core.id,)
+                ):
+                    active_ids.append(order_id)
+                    continue
+                core_claimed = True
+                arrived = _distance(core.position, target) <= MANUAL_ORDER_ARRIVAL_RADIUS
+                if arrived:
+                    if core.view.state is CoreState.MOVING:
+                        core.cancel_move()
+                    else:
+                        core.wait()
+                    self.active_core_move_reason = None
+                    completed.append(order_id)
+                    continue
+                blocked = self._core_blocked_cells(turn, context) | set(
+                    context.danger_cells
+                )
+                directions = _path_directions(
+                    core.position,
+                    target,
+                    blocked,
+                    target_radius=MANUAL_ORDER_ARRIVAL_RADIUS,
+                )
+                if core.view.state is CoreState.MOVING:
+                    expected_destination = (
+                        _destination(core.position, directions[0])
+                        if directions
+                        else None
+                    )
+                    if core.view.destination == expected_destination:
+                        core.clear_action()
+                    else:
+                        core.cancel_move()
+                    self.active_core_move_reason = "MANUAL_ORDER"
+                elif core.view.state is CoreState.NORMAL and directions:
+                    core.start_move(directions[0])
+                    self.active_core_move_reason = "MANUAL_ORDER"
+                else:
+                    core.wait()
+                active_ids.append(order_id)
+                continue
             candidates = {
                 unit.id: unit
                 for unit in units_by_type.get(unit_type, [])
@@ -3817,6 +4208,7 @@ class CoreFarmer:
     def _select_strike_group_ids(
         turn: Turn,
         target: object | None,
+        enemies: Sequence[object] | None = None,
     ) -> tuple[set[UUID], set[UUID]]:
         if target is None:
             return set(), set()
@@ -3875,7 +4267,7 @@ class CoreFarmer:
             in {UnitType.VANGUARD, UnitType.RANGER}
             and _distance(enemy.position, target.position)
             <= ASSAULT_REINFORCEMENT_RADIUS
-            for enemy in turn.visible_enemies
+            for enemy in (turn.visible_enemies if enemies is None else enemies)
         )
         if local_hostiles >= FULL_ASSAULT_HOSTILE_COUNT:
             return (
@@ -3954,6 +4346,7 @@ class CoreFarmer:
         selected_vanguards, selected_rangers = self._select_strike_group_ids(
             turn,
             target,
+            self._hostile_enemies(turn),
         )
         needed_vanguards = max(
             0,
@@ -3998,7 +4391,11 @@ class CoreFarmer:
                 set(self.core_raid_vanguard_ids),
                 set(self.core_raid_ranger_ids),
             )
-        return self._select_strike_group_ids(turn, target)
+        return self._select_strike_group_ids(
+            turn,
+            target,
+            self._hostile_enemies(turn),
+        )
 
     def _refresh_core_raid_launch(
         self,
@@ -4084,7 +4481,7 @@ class CoreFarmer:
                 and enemy.unit_type in {UnitType.VANGUARD, UnitType.RANGER}
                 and _distance(unit.position, enemy.position)
                 <= UNIT_EVADE_TRIGGER_DISTANCE
-                for enemy in turn.visible_enemies
+                for enemy in self._hostile_enemies(turn)
             )
             if (
                 not local_threat
@@ -4253,6 +4650,7 @@ class CoreFarmer:
             turn,
             isolated_core_target,
             context.obstacles,
+            enemies,
         )
         avoidance_enemies = tuple(
             enemy for enemy in enemies if enemy.id != target_id
@@ -4595,6 +4993,7 @@ class CoreFarmer:
             turn,
             isolated_core_target,
             context.obstacles,
+            enemies,
         )
         avoidance_enemies = tuple(
             enemy for enemy in enemies if enemy.id != target_id
@@ -4935,6 +5334,7 @@ class CoreFarmer:
         blocked = (
             set(context.obstacles)
             | set(context.enemy_cells)
+            | set(context.allied_cells)
             | set(turn.resource_cells)
         )
         blocked.update(
@@ -4971,6 +5371,35 @@ class CoreFarmer:
         self.active_core_move_reason = reason
         return True
 
+    def _start_alliance_rally(
+        self,
+        turn: Turn,
+        context: MovementContext,
+        target: Position,
+    ) -> bool:
+        core = turn.core
+        if core is None:
+            return False
+        blocked = self._core_blocked_cells(turn, context) | set(
+            context.danger_cells
+        )
+        directions = _path_directions(
+            core.position,
+            target,
+            blocked,
+            target_radius=ALLY_CORE_RALLY_RADIUS,
+        )
+        if not directions:
+            return False
+        direction = directions[0]
+        destination = _destination(core.position, direction)
+        if not _is_signed_int64_position(destination):
+            return False
+        core.start_move(direction)
+        self.last_retreat_direction = direction
+        self.active_core_move_reason = "ALLY_RALLY"
+        return True
+
     def _moving_core_should_cancel(
         self,
         turn: Turn,
@@ -4989,6 +5418,12 @@ class CoreFarmer:
         if destination in self._core_blocked_cells(turn, context):
             self.last_core_cancel_reason = "DESTINATION_BLOCKED"
             return True
+
+        if self.active_core_move_reason == "ALLY_RALLY":
+            rally_target = self._alliance_rally_target(turn)
+            if rally_target is None:
+                self.last_core_cancel_reason = "ALLY_RALLY_CHANGED"
+                return True
 
         if enemies:
             current_threat_key = _position_threat_key(
@@ -5239,7 +5674,7 @@ class CoreFarmer:
             return
         enemies = tuple(
             enemy
-            for enemy in turn.visible_enemies
+            for enemy in self._hostile_enemies(turn)
             if getattr(enemy, "kind") != "CORE"
             and enemy.unit_type in {UnitType.VANGUARD, UnitType.RANGER}
         )
@@ -5362,6 +5797,23 @@ class CoreFarmer:
             core.wait()
             return
 
+
+        alliance_rally_target = self._alliance_rally_target(turn)
+        if (
+            alliance_rally_target is not None
+            and core.hp == 5
+            and core.shield >= 5
+            and not retreat_enemies
+            and not self.combat_pressure_active
+            and not cargo_waiting
+            and self._start_alliance_rally(
+                turn,
+                context,
+                alliance_rally_target,
+            )
+        ):
+            return
+
         if can_spawn and next_unit is not None:
             core.spawn(next_unit)
             return
@@ -5370,8 +5822,8 @@ class CoreFarmer:
             core.wait()
             return
 
-        # Expansion and Beacon pressure are handled by Units. The Core moves
-        # only when the survival controller starts an EVADE migration.
+        # Routine expansion remains a Unit responsibility. The Core migrates
+        # only for survival or toward the largest fresh alliance member.
         return
 
 
@@ -5640,6 +6092,10 @@ def _position_diagnostics(turn: Turn, tactic: CoreFarmer) -> str:
         f"next_vanguard_cost={unit_cost(UnitType.VANGUARD, population)} "
         f"next_ranger_cost={unit_cost(UnitType.RANGER, population)} "
         f"visible_enemies={len(turn.visible_enemies)} "
+        f"alliance_ready={int(tactic.alliance_ready)} "
+        f"alliance_peers={len(tactic.alliance_peers)} "
+        f"alliance_leader={tactic.alliance_leader.account_id if tactic.alliance_leader else 'none'} "
+        f"allied_objects={len(tactic.allied_object_ids)} "
         f"enemy_types={_format_counts(enemy_counts)} "
         f"global_posture={tactic.threat_assessment.global_posture.value} "
         f"threat_level={tactic.threat_assessment.level.value} "
@@ -5806,16 +6262,49 @@ def play(
     heartbeat_file: Path | None = None,
     history_db: Path | None = None,
     stale_turn_timeout_seconds: float = DEFAULT_STALE_TURN_TIMEOUT_SECONDS,
+    alliance_directory: Path | None = None,
+    alliance_id: str | None = None,
+    alliance_account_id: str | None = None,
+    alliance_expected_members: int = 1,
+    alliance_stale_seconds: float = DEFAULT_ALLIANCE_STALE_SECONDS,
+    alliance_barrier_timeout_seconds: float = DEFAULT_ALLIANCE_BARRIER_TIMEOUT_SECONDS,
 ) -> None:
     if (
         not math.isfinite(stale_turn_timeout_seconds)
         or stale_turn_timeout_seconds < 0
     ):
         raise ValueError("stale Turn timeout must be finite and zero or positive")
+    if alliance_directory is not None and (
+        alliance_id is None or alliance_account_id is None
+    ):
+        raise ValueError(
+            "alliance_id and alliance_account_id are required with alliance_directory"
+        )
+    if alliance_directory is None and (
+        alliance_id is not None or alliance_account_id is not None
+    ):
+        raise ValueError(
+            "alliance_directory is required when alliance coordination is configured"
+        )
+    alliance_coordinator = (
+        AllianceCoordinator(
+            alliance_directory,
+            alliance_id=alliance_id,
+            account_id=alliance_account_id,
+            expected_members=alliance_expected_members,
+            stale_seconds=alliance_stale_seconds,
+            barrier_timeout_seconds=alliance_barrier_timeout_seconds,
+        )
+        if alliance_directory is not None
+        and alliance_id is not None
+        and alliance_account_id is not None
+        else None
+    )
     tactic = CoreFarmer(
         worker_target=worker_target,
         beacon_policy=beacon_policy,
         compatibility_marker=compatibility_marker,
+        alliance_coordinator=alliance_coordinator,
     )
     last_accepted_tick: int | None = None
     resource_ledger_snapshot: ResourceLedgerSnapshot | None = None
@@ -6019,6 +6508,37 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_STALE_TURN_TIMEOUT_SECONDS,
         help="Exit transiently after this many seconds without an accepted Turn (0 disables).",
     )
+    parser.add_argument(
+        "--alliance-directory",
+        type=Path,
+        help="Shared directory used to coordinate trusted local accounts.",
+    )
+    parser.add_argument(
+        "--alliance-id",
+        help="Alliance name shared by accounts in the coordination directory.",
+    )
+    parser.add_argument(
+        "--alliance-account-id",
+        help="Stable non-secret identifier for this account.",
+    )
+    parser.add_argument(
+        "--alliance-expected-members",
+        type=int,
+        default=1,
+        help="Pause autonomous actions until this many fresh members are present.",
+    )
+    parser.add_argument(
+        "--alliance-stale-seconds",
+        type=float,
+        default=DEFAULT_ALLIANCE_STALE_SECONDS,
+        help="Ignore member state older than this many seconds.",
+    )
+    parser.add_argument(
+        "--alliance-barrier-timeout-seconds",
+        type=float,
+        default=DEFAULT_ALLIANCE_BARRIER_TIMEOUT_SECONDS,
+        help="Wait this long for same-Turn member identity before choosing WAIT.",
+    )
     return parser
 
 
@@ -6039,6 +6559,12 @@ def main(argv: list[str] | None = None) -> int:
             heartbeat_file=args.heartbeat_file,
             history_db=args.history_db,
             stale_turn_timeout_seconds=args.stale_turn_timeout_seconds,
+            alliance_directory=args.alliance_directory,
+            alliance_id=args.alliance_id,
+            alliance_account_id=args.alliance_account_id,
+            alliance_expected_members=args.alliance_expected_members,
+            alliance_stale_seconds=args.alliance_stale_seconds,
+            alliance_barrier_timeout_seconds=args.alliance_barrier_timeout_seconds,
         )
 
     except KeyboardInterrupt:

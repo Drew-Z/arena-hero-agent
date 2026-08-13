@@ -19,7 +19,7 @@ VISION_RADII = {
 }
 
 Position = tuple[int, int]
-UNIT_ORDER_TYPES = {"WORKER", "VANGUARD", "RANGER"}
+UNIT_ORDER_TYPES = {"CORE", "WORKER", "VANGUARD", "RANGER"}
 UNIT_ORDER_STATUSES = {"PENDING", "COMPLETED", "CANCELLED"}
 PRODUCTION_UNIT_TYPES = ("WORKER", "VANGUARD", "RANGER")
 INT64_MIN = -(2**63)
@@ -112,6 +112,49 @@ def _connect(path: Path, *, read_only: bool = False) -> sqlite3.Connection:
 
 
 def _ensure_unit_orders_table(connection: sqlite3.Connection) -> None:
+    existing = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'unit_orders'"
+    ).fetchone()
+    if existing is not None:
+        existing_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(unit_orders)")
+        }
+        if "unit_ids_json" not in existing_columns:
+            connection.execute(
+                "ALTER TABLE unit_orders ADD COLUMN unit_ids_json TEXT NOT NULL DEFAULT '[]'"
+            )
+            connection.execute(
+                "UPDATE unit_orders SET status = 'CANCELLED' WHERE status = 'PENDING'"
+            )
+    if existing is not None and "'CORE'" not in str(existing["sql"]):
+        connection.executescript(
+            """
+            DROP INDEX IF EXISTS unit_orders_status_idx;
+            ALTER TABLE unit_orders RENAME TO unit_orders_legacy;
+            CREATE TABLE unit_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at REAL NOT NULL,
+                unit_type TEXT NOT NULL,
+                unit_count INTEGER NOT NULL,
+                unit_ids_json TEXT NOT NULL DEFAULT '[]',
+                target_x INTEGER NOT NULL,
+                target_y INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                completed_tick INTEGER,
+                CHECK (unit_type IN ('CORE', 'WORKER', 'VANGUARD', 'RANGER')),
+                CHECK (unit_count BETWEEN 1 AND 64),
+                CHECK (status IN ('PENDING', 'COMPLETED', 'CANCELLED'))
+            );
+            INSERT INTO unit_orders
+                (id, created_at, unit_type, unit_count, unit_ids_json,
+                 target_x, target_y, status, completed_tick)
+            SELECT id, created_at, unit_type, unit_count, unit_ids_json,
+                   target_x, target_y, status, completed_tick
+            FROM unit_orders_legacy;
+            DROP TABLE unit_orders_legacy;
+            """
+        )
     connection.executescript(
         """
         CREATE TABLE IF NOT EXISTS unit_orders (
@@ -124,7 +167,7 @@ def _ensure_unit_orders_table(connection: sqlite3.Connection) -> None:
             target_y INTEGER NOT NULL,
             status TEXT NOT NULL DEFAULT 'PENDING',
             completed_tick INTEGER,
-            CHECK (unit_type IN ('WORKER', 'VANGUARD', 'RANGER')),
+            CHECK (unit_type IN ('CORE', 'WORKER', 'VANGUARD', 'RANGER')),
             CHECK (unit_count BETWEEN 1 AND 64),
             CHECK (status IN ('PENDING', 'COMPLETED', 'CANCELLED'))
         );
@@ -574,13 +617,15 @@ def create_unit_order(
 ) -> dict[str, object]:
     normalized_type = str(unit_type).upper()
     if normalized_type not in UNIT_ORDER_TYPES:
-        raise ValueError("unit_type must be WORKER, VANGUARD, or RANGER")
+        raise ValueError("unit_type must be CORE, WORKER, VANGUARD, or RANGER")
     if (
         isinstance(unit_count, bool)
         or not isinstance(unit_count, int)
         or not 1 <= unit_count <= 64
     ):
         raise ValueError("unit_count must be between 1 and 64")
+    if normalized_type == "CORE" and unit_count != 1:
+        raise ValueError("CORE orders must select exactly one Core")
     if isinstance(unit_ids, (str, bytes)) or not isinstance(unit_ids, Sequence):
         raise ValueError("unit_ids must be a list of Unit UUIDs")
     try:

@@ -47,6 +47,7 @@
         <span><i class="swatch resource"></i>当前资源</span>
         <span><i class="swatch resource-history"></i>历史资源</span>
         <span><i class="swatch friendly"></i>己方</span>
+        <span><i class="swatch ally"></i>盟友</span>
         <span><i class="swatch enemy"></i>敌方</span>
         <span><i class="swatch old-core"></i>历史 Core</span>
         <span><i class="swatch beacon"></i>冠军信标</span>
@@ -98,13 +99,14 @@
         <form id="order-form" class="order-form">
           <label>兵种
             <select id="order-unit-type">
+              <option value="CORE">核心</option>
               <option value="WORKER">工兵</option>
               <option value="VANGUARD">先锋</option>
               <option value="RANGER">游侠</option>
             </select>
           </label>
           <fieldset class="unit-picker-field">
-            <legend>选择具体单位</legend>
+            <legend>选择具体核心或单位</legend>
             <div id="order-unit-list" class="unit-picker"></div>
           </fieldset>
           <label>数量

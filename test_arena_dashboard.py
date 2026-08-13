@@ -4,6 +4,7 @@ import http.client
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -127,6 +128,37 @@ class HistoryTests(unittest.TestCase):
                     unit_type="WORKER",
                     unit_count=1,
                     unit_ids=[],
+                    target=(0, 0),
+                )
+
+    def test_core_order_upgrades_existing_table_and_is_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            create_unit_order(
+                path,
+                unit_type="WORKER",
+                unit_count=1,
+                unit_ids=[WORKER_ID],
+                target=(1, 0),
+            )
+
+            order = create_unit_order(
+                path,
+                unit_type="CORE",
+                unit_count=1,
+                unit_ids=[CORE_ID],
+                target=(10, -5),
+            )
+
+            self.assertEqual(order["unit_type"], "CORE")
+            self.assertEqual(order["unit_ids"], [CORE_ID])
+            self.assertEqual(list_unit_orders(path)[0]["unit_type"], "CORE")
+            with self.assertRaisesRegex(ValueError, "exactly one Core"):
+                create_unit_order(
+                    path,
+                    unit_type="CORE",
+                    unit_count=2,
+                    unit_ids=[CORE_ID, WORKER_ID],
                     target=(0, 0),
                 )
 
@@ -331,6 +363,52 @@ class HistoryTests(unittest.TestCase):
 
 
 class DashboardTests(unittest.TestCase):
+    def test_alliance_objects_exclude_local_account_and_reject_stale_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            alliance = root / "alliance"
+            alliance.mkdir()
+            peer = {
+                "account_id": "account-2",
+                "username": "ally",
+                "updated_at": time.time(),
+                "core_id": ENEMY_CORE_ID,
+                "core_position": [7, 8],
+                "units": [
+                    {
+                        "id": WORKER_ID,
+                        "position": [6, 8],
+                        "unit_type": "WORKER",
+                        "hp": 2,
+                        "cargo": 1,
+                    }
+                ],
+            }
+            (alliance / "account-2.json").write_text(json.dumps(peer), encoding="utf-8")
+            (alliance / "account-1.json").write_text(
+                json.dumps({**peer, "account_id": "account-1"}),
+                encoding="utf-8",
+            )
+            (alliance / "account-3.json").write_text(
+                json.dumps({**peer, "account_id": "account-3", "updated_at": 1}),
+                encoding="utf-8",
+            )
+            static = root / "dashboard"
+            static.mkdir()
+            app = DashboardApplication(
+                history_db=root / "history.sqlite3",
+                static_root=static,
+                alliance_directory=alliance,
+                alliance_account_id="account-1",
+                alliance_stale_seconds=60,
+            )
+
+            objects = app.alliance_objects()
+
+            self.assertEqual([item["kind"] for item in objects], ["CORE", "UNIT"])
+            self.assertTrue(all(item["alliance_account_id"] == "account-2" for item in objects))
+            self.assertEqual(objects[0]["position"], [7, 8])
+
     def test_order_endpoint_accepts_coordinate_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

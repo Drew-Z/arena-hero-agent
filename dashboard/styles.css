@@ -155,6 +155,7 @@ button:focus-visible, input:focus-visible, canvas:focus-visible { outline: 2px s
 .swatch.resource { background: var(--green); }
 .swatch.resource-history { background: #b88f24; }
 .swatch.friendly { background: var(--cyan); }
+.swatch.ally { background: #ffb7c5; }
 .swatch.enemy { background: var(--red); }
 .swatch.old-core { background: rgba(135, 63, 68, 0.52); border: 1px dashed #cb7178; }
 .swatch.beacon { background: var(--gold); }
