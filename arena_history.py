@@ -22,6 +22,9 @@ Position = tuple[int, int]
 UNIT_ORDER_TYPES = {"CORE", "WORKER", "VANGUARD", "RANGER"}
 UNIT_ORDER_STATUSES = {"PENDING", "COMPLETED", "CANCELLED"}
 PRODUCTION_UNIT_TYPES = ("WORKER", "VANGUARD", "RANGER")
+DEFAULT_ALLIANCE_RALLY_RADIUS = 12
+MIN_ALLIANCE_RALLY_RADIUS = 1
+MAX_ALLIANCE_RALLY_RADIUS = 256
 INT64_MIN = -(2**63)
 INT64_MAX = 2**63 - 1
 
@@ -260,8 +263,57 @@ def _ensure_control_config_tables(connection: sqlite3.Connection) -> None:
             CHECK (vanguard_count BETWEEN 0 AND 32),
             CHECK (enabled IN (0, 1))
         );
+        CREATE TABLE IF NOT EXISTS alliance_config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            rally_radius INTEGER NOT NULL,
+            updated_at REAL NOT NULL,
+            CHECK (rally_radius BETWEEN 1 AND 256)
+        );
         """
     )
+
+
+def _record_enemy_core_destructions(
+    connection: sqlite3.Connection,
+    state: Mapping[str, object],
+    snapshot_tick: int,
+    *,
+    allied_object_ids: frozenset[str] = frozenset(),
+) -> None:
+    events = state.get("events", [])
+    if not isinstance(events, list):
+        return
+    for event in events:
+        if (
+            not isinstance(event, dict)
+            or event.get("event_type") != "DESTRUCTION_PARTICIPATION"
+            or event.get("reason_code") != "CORE"
+        ):
+            continue
+        core_id = str(event.get("target_id", ""))
+        if not core_id or core_id in allied_object_ids:
+            continue
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO enemy_core_destructions (core_id, tick, event_id)
+            VALUES (?, ?, ?)
+            """,
+            (
+                core_id,
+                int(event.get("tick", snapshot_tick)),
+                str(event.get("event_id", "")),
+            ),
+        )
+
+
+def _backfill_enemy_core_destructions(connection: sqlite3.Connection) -> None:
+    for row in connection.execute("SELECT tick, state_json FROM snapshots"):
+        try:
+            state = json.loads(row["state_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(state, dict):
+            _record_enemy_core_destructions(connection, state, int(row["tick"]))
 
 
 def _enemy_core_username(
@@ -285,9 +337,14 @@ def _record_combat_events(
     connection: sqlite3.Connection,
     state: Mapping[str, Any],
     snapshot_tick: int,
+    *,
+    allied_object_ids: frozenset[str] = frozenset(),
+    allied_usernames: frozenset[str] = frozenset(),
 ) -> None:
     for event in state.get("events", []):
         if not isinstance(event, dict) or not event.get("event_id"):
+            continue
+        if str(event.get("actor_id", "")) in allied_object_ids:
             continue
         event_id = str(event["event_id"])
         event_tick = int(event.get("tick", snapshot_tick))
@@ -299,7 +356,10 @@ def _record_combat_events(
         records: list[tuple[str, str, str, str]] = []
         if event_type == "DESTRUCTION_PARTICIPATION":
             target_kind = str(event.get("reason_code", ""))
-            if target_kind in {"UNIT", "CORE"}:
+            if (
+                target_kind in {"UNIT", "CORE"}
+                and str(event.get("target_id", "")) not in allied_object_ids
+            ):
                 username = (
                     _enemy_core_username(
                         connection,
@@ -318,14 +378,20 @@ def _record_combat_events(
         elif event_type == "CORE_DESTROYED" and event.get("reason_code") == "ATTACK":
             attackers = values.get("destroyed_by")
             usernames = (
-                [str(username) for username in attackers if str(username).strip()]
+                [
+                    str(username)
+                    for username in attackers
+                    if str(username).strip()
+                    and str(username).casefold() not in allied_usernames
+                ]
                 if isinstance(attackers, list)
                 else []
             )
-            records.extend(
-                ("SUFFERED", "CORE", "DESTROYED", username)
-                for username in (usernames or [""])
-            )
+            if not isinstance(attackers, list) or usernames:
+                records.extend(
+                    ("SUFFERED", "CORE", "DESTROYED", username)
+                    for username in (usernames or [""])
+                )
         for direction, target_kind, outcome, username in records:
             connection.execute(
                 """
@@ -436,8 +502,18 @@ class HistoryRecorder:
             );
             CREATE INDEX IF NOT EXISTS enemy_core_tick_idx
                 ON enemy_core_sightings (tick);
+            CREATE TABLE IF NOT EXISTS enemy_core_destructions (
+                core_id TEXT NOT NULL,
+                tick INTEGER NOT NULL,
+                event_id TEXT NOT NULL,
+                PRIMARY KEY (core_id, tick, event_id)
+            );
+            CREATE INDEX IF NOT EXISTS enemy_core_destruction_tick_idx
+                ON enemy_core_destructions (tick);
             """
         )
+        with self.connection:
+            _backfill_enemy_core_destructions(self.connection)
         _ensure_unit_orders_table(self.connection)
         _ensure_control_config_tables(self.connection)
         combat_schema_upgraded = _ensure_combat_records_table(self.connection)
@@ -454,6 +530,8 @@ class HistoryRecorder:
         turn: object,
         *,
         strategy: Mapping[str, object] | None = None,
+        allied_object_ids: Sequence[object] = (),
+        allied_usernames: Sequence[str] = (),
     ) -> None:
         tick = int(getattr(turn, "tick"))
         state = getattr(turn, "state").model_dump(mode="json", exclude_none=True)
@@ -480,12 +558,20 @@ class HistoryRecorder:
             for raw_position in item.get("positions", [])
             if (position := _position(raw_position)) is not None
         }
+        allied_ids = frozenset(str(identifier) for identifier in allied_object_ids)
+        allied_names = frozenset(
+            str(username).casefold()
+            for username in allied_usernames
+            if str(username).strip()
+        )
         enemy_cores = [
             item
             for item in objects
             if isinstance(item, dict)
             and item.get("kind") == "CORE"
             and item.get("controlled") is False
+            and str(item.get("id", "")) not in allied_ids
+            and str(item.get("owner_username", "")).casefold() not in allied_names
             and _position(item.get("position")) is not None
         ]
         with self.connection:
@@ -533,7 +619,19 @@ class HistoryRecorder:
                         str(item.get("state", "UNKNOWN")),
                     ),
                 )
-            _record_combat_events(self.connection, state, tick)
+            _record_enemy_core_destructions(
+                self.connection,
+                state,
+                tick,
+                allied_object_ids=allied_ids,
+            )
+            _record_combat_events(
+                self.connection,
+                state,
+                tick,
+                allied_object_ids=allied_ids,
+                allied_usernames=allied_names,
+            )
             cutoff = self.connection.execute(
                 "SELECT tick FROM snapshots ORDER BY tick DESC LIMIT 1 OFFSET ?",
                 (self.limit - 1,),
@@ -545,6 +643,10 @@ class HistoryRecorder:
                 )
                 self.connection.execute(
                     "DELETE FROM enemy_core_sightings WHERE tick < ?",
+                    (cutoff["tick"],),
+                )
+                self.connection.execute(
+                    "DELETE FROM enemy_core_destructions WHERE tick < ?",
                     (cutoff["tick"],),
                 )
 
@@ -754,12 +856,48 @@ def _read_control_config(
         FROM expeditions ORDER BY id
         """
     ).fetchall()
+    alliance = connection.execute(
+        "SELECT rally_radius, updated_at FROM alliance_config WHERE id = 1"
+    ).fetchone()
     return {
         "production": dict(production) if production is not None else None,
+        "alliance": (
+            dict(alliance)
+            if alliance is not None
+            else {"rally_radius": DEFAULT_ALLIANCE_RALLY_RADIUS, "updated_at": None}
+        ),
         "expeditions": [
             {**dict(row), "enabled": bool(row["enabled"])} for row in expeditions
         ],
     }
+
+
+def save_alliance_config(
+    path: Path,
+    *,
+    rally_radius: int,
+) -> dict[str, object]:
+    if isinstance(rally_radius, bool) or not isinstance(rally_radius, int):
+        raise ValueError("alliance rally radius must be an integer")
+    if not MIN_ALLIANCE_RALLY_RADIUS <= rally_radius <= MAX_ALLIANCE_RALLY_RADIUS:
+        raise ValueError(
+            "alliance rally radius must be between "
+            f"{MIN_ALLIANCE_RALLY_RADIUS} and {MAX_ALLIANCE_RALLY_RADIUS}"
+        )
+    updated_at = time.time()
+    with closing(_connect(path)) as connection:
+        _ensure_control_config_tables(connection)
+        connection.execute(
+            """
+            INSERT INTO alliance_config VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                rally_radius=excluded.rally_radius,
+                updated_at=excluded.updated_at
+            """,
+            (rally_radius, updated_at),
+        )
+        connection.commit()
+    return {"rally_radius": rally_radius, "updated_at": updated_at}
 
 
 def read_control_config(path: Path) -> dict[str, object]:
@@ -883,7 +1021,12 @@ def delete_expedition(path: Path, expedition_id: int) -> None:
         connection.commit()
 
 
-def read_kill_stats(path: Path, *, recent_limit: int = 32) -> dict[str, object]:
+def read_kill_stats(
+    path: Path,
+    *,
+    recent_limit: int = 32,
+    excluded_usernames: Sequence[str] = (),
+) -> dict[str, object]:
     if not path.is_file():
         return {
             "available": False,
@@ -911,6 +1054,17 @@ def read_kill_stats(path: Path, *, recent_limit: int = 32) -> dict[str, object]:
                 "losses": [],
                 "revenge_targets": [],
             }
+    excluded_names = {
+        str(username).casefold()
+        for username in excluded_usernames
+        if str(username).strip()
+    }
+    rows = [
+        row
+        for row in rows
+        if not row["username"]
+        or str(row["username"]).casefold() not in excluded_names
+    ]
     dealt = [row for row in rows if row["direction"] == "DEALT"]
     suffered = [row for row in rows if row["direction"] == "SUFFERED"]
     unit_participations = sum(row["target_kind"] == "UNIT" for row in dealt)
@@ -1053,8 +1207,14 @@ def read_overview(
                 FROM enemy_core_sightings WHERE tick <= ? GROUP BY core_id
             ) AS latest
             ON latest.core_id = sighting.core_id AND latest.tick = sighting.tick
+            WHERE NOT EXISTS (
+                SELECT 1 FROM enemy_core_destructions AS destruction
+                WHERE destruction.core_id = sighting.core_id
+                  AND destruction.tick >= sighting.tick
+                  AND destruction.tick <= ?
+            )
             """,
-            (selected_tick,),
+            (selected_tick, selected_tick),
         ).fetchall()
         trail_rows = connection.execute(
             """

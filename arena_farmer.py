@@ -101,12 +101,15 @@ CORE_RAID_RALLY_TIMEOUT_TICKS = 12
 CORE_TARGET_DURABILITY_WEIGHT = 2
 CORE_TARGET_PROTECTOR_HP_WEIGHT = 3
 ISOLATED_CORE_CONFIRM_TICKS = 2
+STALLED_CORE_CONFIRM_TICKS = 3
+STALLED_CORE_NEARBY_RADIUS = 5
 CORE_VISIBILITY_GAP_TICKS = 2
 CORE_RAID_STRIKE_MAX_DISTANCE = 256
 CORE_RAID_STRIKE_RELEASE_DISTANCE = 320
 CORE_RAID_MEMORY_TTL = 256
 CORE_OBSERVER_MIN_DISTANCE = 2
 CORE_OBSERVER_MAX_DISTANCE = 3
+COMBAT_OBSERVER_MAX_DISTANCE = 6
 CORE_PROTECTOR_RADIUS = 5
 UNIT_HEAL_RESOURCE_RESERVE = 10
 POST_THREAT_CAUTION_TICKS = 8
@@ -144,6 +147,8 @@ CORE_BULK_CARGO_ETA = 4
 CORE_BULK_CARGO = 3
 CORE_CONGESTED_CARGO = 3
 CORE_DELIVERY_CHAIN_MAX = 8
+CORE_MIGRATION_DELIVERY_BACKLOG = 6
+CORE_MIGRATION_DELIVERY_TICKS = 6
 CORE_EVADE_TRIGGER_DISTANCE = 12
 CORE_EVADE_RELEASE_DISTANCE = CORE_EVADE_TRIGGER_DISTANCE + 2
 CORE_MOVE_COMMIT_PROGRESS = 2
@@ -302,6 +307,7 @@ class CoreRaidTarget:
     id: UUID
     position: Position
     visible_enemy: object | None
+    stalled: bool = False
 
 
 @dataclass(slots=True)
@@ -653,10 +659,12 @@ def _core_raid_strike_distance(
     vanguards: Sequence[object],
     rangers: Sequence[object],
 ) -> int:
-    return max(
-        min(_distance(defender.position, position) for defender in vanguards),
-        min(_distance(defender.position, position) for defender in rangers),
-    )
+    nearest = [
+        min(_distance(defender.position, position) for defender in units)
+        for units in (vanguards, rangers)
+        if units
+    ]
+    return max(nearest, default=SIGNED_INT64_MAX)
 
 
 def _minimum_cost_assignment(costs: Sequence[Sequence[int]]) -> tuple[int, ...]:
@@ -1903,6 +1911,7 @@ class CoreFarmer:
         self.allied_usernames: set[str] = set()
         self.allied_occupied_cells: set[Position] = set()
         self.alliance_leader: AlliancePeer | None = None
+        self.alliance_rally_radius = ALLY_CORE_RALLY_RADIUS
         self.alliance_turn_tick: int | None = None
         self.compatibility_hold = False
         self.known_obstacles: set[Position] = set()
@@ -1948,6 +1957,7 @@ class CoreFarmer:
         self.healing_defender_ids: set[UUID] = set()
         self.stationary_core_memory: dict[UUID, EnemyCoreSighting] = {}
         self.isolated_core_target_id: UUID | None = None
+        self.core_raid_stalled = False
         self.core_raid_rally_position: Position | None = None
         self.core_raid_launched = False
         self.core_raid_started_tick: int | None = None
@@ -1966,6 +1976,7 @@ class CoreFarmer:
         self.production_weights: dict[UnitType, int] | None = None
         self.expedition_members: dict[int, set[UUID]] = {}
         self.revenge_usernames: set[str] = set()
+        self.manual_core_order_active = False
 
     def _refresh_alliance(self, turn: Turn) -> None:
         coordinator = self.alliance_coordinator
@@ -2016,6 +2027,9 @@ class CoreFarmer:
             for peer in peers
             if peer.account_id != coordinator.account_id and peer.username
         }
+        self.revenge_usernames.difference_update(
+            username.casefold() for username in self.allied_usernames
+        )
         self.allied_occupied_cells = {
             position
             for peer in peers
@@ -2091,7 +2105,7 @@ class CoreFarmer:
             or core is None
             or leader.account_id == coordinator.account_id
             or leader.core_position is None
-            or _distance(core.position, leader.core_position) <= ALLY_CORE_RALLY_RADIUS
+            or _distance(core.position, leader.core_position) <= self.alliance_rally_radius
         ):
             return None
         return leader.core_position
@@ -2156,6 +2170,7 @@ class CoreFarmer:
     def _release_core_raid(self, *, forget_position: bool = False) -> None:
         target_id = self.isolated_core_target_id
         self.isolated_core_target_id = None
+        self.core_raid_stalled = False
         self.core_raid_rally_position = None
         self.core_raid_launched = False
         self.core_raid_started_tick = None
@@ -2172,20 +2187,25 @@ class CoreFarmer:
         self.unit_hunt_vanguard_ids.clear()
         self.unit_hunt_ranger_ids.clear()
 
-    def _infer_core_observer(self, turn: Turn, enemy_core: object) -> UUID | None:
-        candidates = [
+    def _infer_core_observer(
+        self,
+        turn: Turn,
+        enemy_core: object,
+        *,
+        allow_workers: bool = True,
+    ) -> UUID | None:
+        worker_candidates = [
             worker
             for worker in turn.workers
+            if allow_workers
             if worker.cargo == 0
             and worker.position not in turn.resource_cells
             and _distance(worker.position, enemy_core.position)
             <= CORE_OBSERVER_MAX_DISTANCE
         ]
-        if not candidates:
-            return None
         newly_exposing = [
             worker
-            for worker in candidates
+            for worker in worker_candidates
             if not self.worker_history.get(worker.id)
             or _distance(
                 self.worker_history[worker.id][-1],
@@ -2193,15 +2213,41 @@ class CoreFarmer:
             )
             > CORE_OBSERVER_MAX_DISTANCE
         ]
-        pool = newly_exposing or candidates
-        return min(
-            pool,
-            key=lambda worker: (
-                abs(
-                    _distance(worker.position, enemy_core.position)
-                    - CORE_OBSERVER_MAX_DISTANCE
+        pool = newly_exposing or worker_candidates
+        if pool:
+            return min(
+                pool,
+                key=lambda worker: (
+                    abs(
+                        _distance(worker.position, enemy_core.position)
+                        - CORE_OBSERVER_MAX_DISTANCE
+                    ),
+                    _uuid_sort_key(worker),
                 ),
-                _uuid_sort_key(worker),
+            ).id
+
+        guard_vanguards, guard_rangers = _core_guard_ids(turn)
+        reserve_vanguards, reserve_rangers = _core_reserve_ids(turn)
+        protected_ids = (
+            guard_vanguards
+            | guard_rangers
+            | reserve_vanguards
+            | reserve_rangers
+        )
+        combat_candidates = [
+            unit
+            for unit in (*turn.vanguards, *turn.rangers)
+            if unit.id not in protected_ids
+            and _distance(unit.position, enemy_core.position)
+            <= COMBAT_OBSERVER_MAX_DISTANCE
+        ]
+        if not combat_candidates:
+            return None
+        return min(
+            combat_candidates,
+            key=lambda unit: (
+                _distance(unit.position, enemy_core.position),
+                _uuid_sort_key(unit),
             ),
         ).id
 
@@ -2557,7 +2603,11 @@ class CoreFarmer:
 
         hidden_unit_ids = set(self.enemy_unit_sightings) - set(visible_units)
         for unit_id in hidden_unit_ids:
-            self.enemy_unit_sightings.pop(unit_id, None)
+            if (
+                turn.tick - self.enemy_unit_sightings[unit_id].last_tick
+                > CORE_VISIBILITY_GAP_TICKS
+            ):
+                self.enemy_unit_sightings.pop(unit_id, None)
         self.active_enemy_ids.clear()
         self.preemptive_evade_enemy_ids.clear()
         self.pursuing_enemy_ids.clear()
@@ -2591,10 +2641,12 @@ class CoreFarmer:
             sighting = self.enemy_unit_sightings.get(unit_id)
             if (
                 sighting is not None
-                and sighting.last_tick == turn.tick - 1
                 and sighting.position == enemy_unit.position
+                and turn.tick - sighting.last_tick - 1
+                <= CORE_VISIBILITY_GAP_TICKS
             ):
                 sighting.last_tick = turn.tick
+                sighting.observations += 1
             else:
                 self.enemy_unit_sightings[unit_id] = EnemyCoreSighting(
                     position=enemy_unit.position,
@@ -2821,6 +2873,37 @@ class CoreFarmer:
                     observations=current_sighting.observations,
                 )
 
+    def _core_and_nearby_units_stalled(
+        self,
+        turn: Turn,
+        enemy_core: object,
+    ) -> bool:
+        """Confirm that a visible Core and its local units stayed put for 3 ticks."""
+        if enemy_core.state is not CoreState.NORMAL:
+            return False
+        core_sighting = self.enemy_core_sightings.get(enemy_core.id)
+        if (
+            core_sighting is None
+            or core_sighting.position != enemy_core.position
+            or core_sighting.last_tick != turn.tick
+            or core_sighting.observations < STALLED_CORE_CONFIRM_TICKS
+        ):
+            return False
+        nearby_units = (
+            enemy
+            for enemy in self._hostile_enemies(turn)
+            if getattr(enemy, "kind", None) != "CORE"
+            and _distance(enemy.position, enemy_core.position)
+            <= STALLED_CORE_NEARBY_RADIUS
+        )
+        return all(
+            (sighting := self.enemy_unit_sightings.get(enemy.id)) is not None
+            and sighting.position == enemy.position
+            and sighting.last_tick == turn.tick
+            and sighting.observations >= STALLED_CORE_CONFIRM_TICKS
+            for enemy in nearby_units
+        )
+
     def _select_isolated_core_target(self, turn: Turn) -> CoreRaidTarget | None:
         core = turn.core
         mature_fleet = (
@@ -2838,17 +2921,19 @@ class CoreFarmer:
                 EARLY_ASSAULT_MIN_RANGERS,
             )
         )
-        if (
-            len(turn.vanguards) < minimum_vanguards
-            or len(turn.rangers) < minimum_rangers
-        ):
-            self._release_core_raid()
-            return None
+        full_assault_ready = (
+            len(turn.vanguards) >= minimum_vanguards
+            and len(turn.rangers) >= minimum_rangers
+        )
 
         guard_vanguards, guard_rangers = _core_guard_ids(turn)
         reserve_vanguards, reserve_rangers = _core_reserve_ids(turn)
 
-        def strike_groups(position: Position) -> tuple[tuple[object, ...], tuple[object, ...]]:
+        def strike_groups(
+            position: Position,
+            *,
+            stalled: bool = False,
+        ) -> tuple[tuple[object, ...], tuple[object, ...]]:
             vanguards = sorted(
                 (
                     unit
@@ -2865,6 +2950,8 @@ class CoreFarmer:
                 ),
                 key=lambda unit: (_distance(unit.position, position), _uuid_sort_key(unit)),
             )
+            if stalled:
+                return tuple(vanguards), tuple(rangers)
             if not mature_fleet:
                 vanguards = sorted(
                     (unit for unit in turn.vanguards if unit.id not in guard_vanguards),
@@ -2883,6 +2970,11 @@ class CoreFarmer:
             enemy.id: enemy
             for enemy in self._hostile_enemies(turn)
             if getattr(enemy, "kind") == "CORE"
+        }
+        stalled_core_ids = {
+            enemy.id
+            for enemy in visible_cores.values()
+            if self._core_and_nearby_units_stalled(turn, enemy)
         }
 
         if self.isolated_core_target_id is not None:
@@ -2906,16 +2998,42 @@ class CoreFarmer:
                     ),
                 )
                 self.stationary_core_memory[target_id] = remembered
+            stalled_target = self.core_raid_stalled
+            if visible_target is not None:
+                if self.core_raid_stalled and target_id in stalled_core_ids:
+                    stalled_target = True
+                elif not full_assault_ready:
+                    self._release_core_raid()
+                    return None
+                else:
+                    stalled_target = False
             vanguard_strike_group, ranger_strike_group = strike_groups(
-                remembered.position if remembered is not None else core.position
+                remembered.position if remembered is not None else core.position,
+                stalled=stalled_target,
             )
+            if not vanguard_strike_group and not ranger_strike_group:
+                self._release_core_raid()
+                return None
             release_target = (
                 remembered is None
                 or turn.tick - remembered.last_tick > CORE_RAID_MEMORY_TTL
-                or _core_raid_strike_distance(
-                    remembered.position,
-                    vanguard_strike_group,
-                    ranger_strike_group,
+                or (
+                    min(
+                        (
+                            _distance(unit.position, remembered.position)
+                            for unit in (
+                                *vanguard_strike_group,
+                                *ranger_strike_group,
+                            )
+                        ),
+                        default=SIGNED_INT64_MAX,
+                    )
+                    if stalled_target
+                    else _core_raid_strike_distance(
+                        remembered.position,
+                        vanguard_strike_group,
+                        ranger_strike_group,
+                    )
                 )
                 > CORE_RAID_STRIKE_RELEASE_DISTANCE
             )
@@ -2932,21 +3050,42 @@ class CoreFarmer:
                 self._release_core_raid(forget_position=forget_position)
             else:
                 assert remembered is not None
+                self.core_raid_stalled = stalled_target
                 return CoreRaidTarget(
                     id=target_id,
                     position=remembered.position,
                     visible_enemy=visible_target,
+                    stalled=stalled_target,
                 )
 
         candidates = []
         for enemy_core in visible_cores.values():
-            vanguard_strike_group, ranger_strike_group = strike_groups(
-                enemy_core.position
+            stalled_target = (
+                not full_assault_ready
+                and enemy_core.id in stalled_core_ids
             )
-            strike_distance = _core_raid_strike_distance(
+            if not full_assault_ready and not stalled_target:
+                continue
+            vanguard_strike_group, ranger_strike_group = strike_groups(
                 enemy_core.position,
-                vanguard_strike_group,
-                ranger_strike_group,
+                stalled=stalled_target,
+            )
+            if not vanguard_strike_group and not ranger_strike_group:
+                continue
+            strike_distance = (
+                min(
+                    _distance(unit.position, enemy_core.position)
+                    for unit in (
+                        *vanguard_strike_group,
+                        *ranger_strike_group,
+                    )
+                )
+                if stalled_target
+                else _core_raid_strike_distance(
+                    enemy_core.position,
+                    vanguard_strike_group,
+                    ranger_strike_group,
+                )
             )
             if strike_distance > CORE_RAID_STRIKE_MAX_DISTANCE:
                 continue
@@ -2961,12 +3100,15 @@ class CoreFarmer:
                         self._hostile_enemies(turn),
                     ),
                     enemy_core,
+                    stalled_target,
                 )
             )
 
         if not candidates:
             return None
-        target = min(candidates, key=lambda candidate: candidate[:2])[2]
+        selected = min(candidates, key=lambda candidate: candidate[:2])
+        target = selected[2]
+        stalled_target = selected[3]
         sighting = self.enemy_core_sightings.get(target.id)
         self.stationary_core_memory[target.id] = EnemyCoreSighting(
             position=target.position,
@@ -2975,7 +3117,11 @@ class CoreFarmer:
             observations=sighting.observations if sighting is not None else 1,
         )
         self.isolated_core_target_id = target.id
-        vanguard_strike_group, ranger_strike_group = strike_groups(target.position)
+        self.core_raid_stalled = stalled_target
+        vanguard_strike_group, ranger_strike_group = strike_groups(
+            target.position,
+            stalled=stalled_target,
+        )
         self.core_raid_vanguard_ids = {
             unit.id for unit in vanguard_strike_group
         }
@@ -2987,7 +3133,7 @@ class CoreFarmer:
             (*vanguard_strike_group, *ranger_strike_group),
             target.position,
         )
-        self.core_raid_launched = False
+        self.core_raid_launched = stalled_target
         observer_id = self.core_observer_candidates.get(target.id)
         living_empty_workers = {
             worker.id
@@ -3002,6 +3148,7 @@ class CoreFarmer:
             id=target.id,
             position=target.position,
             visible_enemy=target,
+            stalled=stalled_target,
         )
 
     def _stationary_enemy_units(self, turn: Turn) -> tuple[object, ...]:
@@ -3525,10 +3672,24 @@ class CoreFarmer:
             ),
             None,
         )
-        if worker is None or worker.cargo > 0:
+        combat_observer = next(
+            (
+                candidate
+                for candidate in (*turn.vanguards, *turn.rangers)
+                if candidate.id == self.core_raid_spotter_id
+            ),
+            None,
+        )
+        if worker is None and combat_observer is None:
+            self._release_core_observer()
+            return None
+        if worker is not None and worker.cargo > 0:
             self._release_core_observer()
             return None
         if raid_target is not None:
+            if combat_observer is not None:
+                self._release_core_observer()
+                return None
             return raid_target.position
         target_id = self.core_observer_target_id
         sighting = (
@@ -3601,6 +3762,33 @@ class CoreFarmer:
         worker.wait()
         self._set_worker_mode(worker, "CORE_OBSERVER_BLOCKED", target)
 
+    def _control_combat_observer(
+        self,
+        unit: object,
+        target: Position,
+        context: MovementContext,
+    ) -> bool:
+        if unit.id != self.core_raid_spotter_id:
+            return False
+        current_distance = _distance(unit.position, target)
+        if (
+            CORE_OBSERVER_MIN_DISTANCE
+            <= current_distance
+            <= COMBAT_OBSERVER_MAX_DISTANCE
+            and unit.position not in context.danger_cells
+        ):
+            unit.wait()
+            return True
+        if _queue_toward(
+            unit,
+            target,
+            context,
+            target_radius=CORE_OBSERVER_MAX_DISTANCE,
+        ):
+            return True
+        unit.wait()
+        return True
+
     def choose_actions(self, turn: Turn) -> None:
         turn.clear()
         self._refresh_alliance(turn)
@@ -3645,6 +3833,11 @@ class CoreFarmer:
             )
         elif isolated_core_target is not None:
             self._release_unit_hunt()
+        if (
+            stationary_unit_target is not None
+            and self.core_observer_target_id == stationary_unit_target.id
+        ):
+            self._release_core_observer()
         combat_target = isolated_core_target or stationary_unit_target
         observer_position = self._core_observer_position(
             turn,
@@ -3702,6 +3895,10 @@ class CoreFarmer:
             reserved_destinations=set(),
             core_position=core.position,
             preplanned_units=set(),
+        )
+        moving_core_lane_units = self._clear_moving_core_destination(
+            turn,
+            context,
         )
         context.delivery_lane = _select_delivery_lane(context)
         breakout = _is_multi_axis_breakout(
@@ -3767,7 +3964,13 @@ class CoreFarmer:
             combat_target,
             retreat_enemies,
         )
-        reserve_core_for_spawn = spawn_reservation is not None
+        alliance_rally_target = self._alliance_rally_target(turn)
+        migration_delivery_pause = self._migration_delivery_pause(turn) and (
+            self.manual_core_order_active or alliance_rally_target is not None
+        )
+        reserve_core_for_spawn = (
+            spawn_reservation is not None and not migration_delivery_pause
+        )
         raid_launched = self._refresh_core_raid_launch(
             turn,
             isolated_core_target,
@@ -3795,6 +3998,7 @@ class CoreFarmer:
                 force_departure=reserve_core_for_spawn,
             )
         )
+        preplanned_units.update(moving_core_lane_units)
         context.preplanned_units = preplanned_units
         for worker in workers:
             if worker.id not in preplanned_units:
@@ -3980,6 +4184,7 @@ class CoreFarmer:
             combat_target,
             raid_launched=raid_launched,
             reserve_core_for_spawn=reserve_core_for_spawn,
+            observer_position=observer_position,
         )
         self._control_rangers(
             turn,
@@ -3988,6 +4193,7 @@ class CoreFarmer:
             combat_target,
             raid_launched=raid_launched,
             reserve_core_for_spawn=reserve_core_for_spawn,
+            observer_position=observer_position,
         )
         self._control_core(turn, context, combat_target)
 
@@ -4059,6 +4265,14 @@ class CoreFarmer:
                     self.active_core_move_reason = None
                     completed.append(order_id)
                     continue
+                if (
+                    core.view.state is CoreState.NORMAL
+                    and self._migration_delivery_pause(turn)
+                ):
+                    core.wait()
+                    self.active_core_move_reason = None
+                    active_ids.append(order_id)
+                    continue
                 blocked = self._core_blocked_cells(turn, context) | set(
                     context.danger_cells
                 )
@@ -4068,6 +4282,25 @@ class CoreFarmer:
                     blocked,
                     target_radius=MANUAL_ORDER_ARRIVAL_RADIUS,
                 )
+                if (
+                    core.view.state is CoreState.NORMAL
+                    and not directions
+                    and self._clear_core_departure_lane(
+                        turn,
+                        context,
+                        target,
+                        target_radius=MANUAL_ORDER_ARRIVAL_RADIUS,
+                    )
+                ):
+                    blocked = self._core_blocked_cells(turn, context) | set(
+                        context.danger_cells
+                    )
+                    directions = _path_directions(
+                        core.position,
+                        target,
+                        blocked,
+                        target_radius=MANUAL_ORDER_ARRIVAL_RADIUS,
+                    )
                 if core.view.state is CoreState.MOVING:
                     expected_destination = (
                         _destination(core.position, directions[0])
@@ -4297,6 +4530,19 @@ class CoreFarmer:
                 len(turn.vanguards) >= MATURE_GUARD_FLEET_MIN
                 and len(turn.rangers) >= MATURE_GUARD_FLEET_MIN
             )
+            if target.stalled:
+                return (
+                    {
+                        unit.id
+                        for unit in available_vanguards
+                        if unit.id not in reserve_vanguards
+                    },
+                    {
+                        unit.id
+                        for unit in available_rangers
+                        if unit.id not in reserve_rangers
+                    },
+                )
             if not mature_fleet:
                 return (
                     {unit.id for unit in available_vanguards},
@@ -4667,6 +4913,7 @@ class CoreFarmer:
             id=target_id,
             position=remembered.position,
             visible_enemy=None,
+            stalled=self.core_raid_stalled,
         )
 
     def _strike_group_locally_threatened(
@@ -4850,6 +5097,7 @@ class CoreFarmer:
         *,
         raid_launched: bool,
         reserve_core_for_spawn: bool,
+        observer_position: Position | None = None,
     ) -> None:
         core = turn.core
         if core is None:
@@ -4909,6 +5157,15 @@ class CoreFarmer:
                     vanguard.sweep(direction)
                     continue
             if context.preplanned_units and vanguard.id in context.preplanned_units:
+                continue
+            if (
+                observer_position is not None
+                and self._control_combat_observer(
+                    vanguard,
+                    observer_position,
+                    context,
+                )
+            ):
                 continue
             immediate_core_threats = [
                 enemy
@@ -5217,6 +5474,7 @@ class CoreFarmer:
         *,
         raid_launched: bool,
         reserve_core_for_spawn: bool,
+        observer_position: Position | None = None,
     ) -> None:
         core = turn.core
         if core is None:
@@ -5278,6 +5536,15 @@ class CoreFarmer:
                     ranger.shoot(target)
                 continue
             if context.preplanned_units and ranger.id in context.preplanned_units:
+                continue
+            if (
+                observer_position is not None
+                and self._control_combat_observer(
+                    ranger,
+                    observer_position,
+                    context,
+                )
+            ):
                 continue
             immediate_core_threats = [
                 enemy
@@ -5590,6 +5857,21 @@ class CoreFarmer:
             )
         )
 
+    def _migration_delivery_pause(self, turn: Turn) -> bool:
+        """Provide a bounded delivery window between Core migration steps."""
+        core = turn.core
+        if core is None or turn.resource_space <= 0:
+            return False
+        cargo_workers = [worker for worker in turn.workers if worker.cargo > 0]
+        if any(worker.position == core.position for worker in cargo_workers):
+            return True
+        return (
+            len(cargo_workers) >= CORE_MIGRATION_DELIVERY_BACKLOG
+            and 0
+            <= turn.tick - self.last_core_move_tick
+            <= CORE_MIGRATION_DELIVERY_TICKS
+        )
+
     def _core_blocked_cells(
         self,
         turn: Turn,
@@ -5651,8 +5933,23 @@ class CoreFarmer:
             core.position,
             target,
             blocked,
-            target_radius=ALLY_CORE_RALLY_RADIUS,
+            target_radius=self.alliance_rally_radius,
         )
+        if not directions and self._clear_core_departure_lane(
+            turn,
+            context,
+            target,
+            target_radius=self.alliance_rally_radius,
+        ):
+            blocked = self._core_blocked_cells(turn, context) | set(
+                context.danger_cells
+            )
+            directions = _path_directions(
+                core.position,
+                target,
+                blocked,
+                target_radius=self.alliance_rally_radius,
+            )
         if not directions:
             return False
         direction = directions[0]
@@ -5663,6 +5960,119 @@ class CoreFarmer:
         self.last_retreat_direction = direction
         self.active_core_move_reason = "ALLY_RALLY"
         return True
+
+    def _clear_core_departure_lane(
+        self,
+        turn: Turn,
+        context: MovementContext,
+        target: Position,
+        *,
+        target_radius: int,
+    ) -> bool:
+        """Move friendly units out of the first viable Core route cell."""
+        core = turn.core
+        if core is None or core.view.state is not CoreState.NORMAL:
+            return False
+        fixed_blocked = (
+            set(context.obstacles)
+            | set(context.enemy_cells)
+            | set(context.danger_cells)
+            | set(context.allied_cells)
+            | set(turn.resource_cells)
+        )
+        directions = _path_directions(
+            core.position,
+            target,
+            fixed_blocked,
+            target_radius=target_radius,
+        )
+        if not directions:
+            return False
+        lane = _destination(core.position, directions[0])
+        excess = context.friendly_counts[lane]
+        if excess == 0:
+            return False
+        core_neighbors = {
+            _destination(core.position, direction)
+            for direction in CARDINAL_DIRECTIONS
+        }
+        occupants = sorted(
+            (unit for unit in turn.units if unit.position == lane),
+            key=lambda unit: (
+                0 if getattr(unit, "unit_type", None) is UnitType.WORKER else 1,
+                int(getattr(unit, "cargo", 0) > 0),
+                _uuid_sort_key(unit),
+            ),
+        )
+        for unit in occupants:
+            escape_directions = tuple(
+                sorted(
+                    CARDINAL_DIRECTIONS,
+                    key=lambda direction: (
+                        _destination(unit.position, direction) in core_neighbors,
+                        context.friendly_counts[
+                            _destination(unit.position, direction)
+                        ],
+                        -_distance(
+                            _destination(unit.position, direction),
+                            core.position,
+                        ),
+                        CARDINAL_DIRECTIONS.index(direction),
+                    ),
+                )
+            )
+            if not _queue_move(unit, escape_directions, context):
+                continue
+            if getattr(unit, "unit_type", None) is UnitType.WORKER:
+                self._set_worker_mode(unit, "CORE_LANE_CLEAR", target)
+            excess -= 1
+            if excess == 0:
+                return True
+        return False
+
+    def _clear_moving_core_destination(
+        self,
+        turn: Turn,
+        context: MovementContext,
+    ) -> set[UUID]:
+        core = turn.core
+        if (
+            core is None
+            or core.view.state is not CoreState.MOVING
+            or core.view.destination is None
+        ):
+            return set()
+        destination = core.view.destination
+        occupants = sorted(
+            (unit for unit in turn.units if unit.position == destination),
+            key=lambda unit: (
+                0 if getattr(unit, "unit_type", None) is UnitType.WORKER else 1,
+                int(getattr(unit, "cargo", 0) > 0),
+                _uuid_sort_key(unit),
+            ),
+        )
+        moved: set[UUID] = set()
+        for unit in occupants:
+            directions = tuple(
+                sorted(
+                    CARDINAL_DIRECTIONS,
+                    key=lambda direction: (
+                        _destination(unit.position, direction) == core.position,
+                        context.friendly_counts[
+                            _destination(unit.position, direction)
+                        ],
+                        -_distance(
+                            _destination(unit.position, direction),
+                            core.position,
+                        ),
+                        CARDINAL_DIRECTIONS.index(direction),
+                    ),
+                )
+            )
+            if _queue_move(unit, directions, context):
+                moved.add(unit.id)
+        context.reserved_destinations.add(destination)
+        return moved
 
     def _moving_core_should_cancel(
         self,
@@ -5679,7 +6089,17 @@ class CoreFarmer:
 
         self.last_core_cancel_reason = "NONE"
         destination = core.view.destination
-        if destination in self._core_blocked_cells(turn, context):
+        fixed_blocked = (
+            set(context.obstacles)
+            | set(context.enemy_cells)
+            | set(context.danger_cells)
+            | set(context.allied_cells)
+            | set(turn.resource_cells)
+        )
+        if destination in fixed_blocked:
+            self.last_core_cancel_reason = "DESTINATION_BLOCKED"
+            return True
+        if context.friendly_counts[destination] > 0:
             self.last_core_cancel_reason = "DESTINATION_BLOCKED"
             return True
 
@@ -6009,6 +6429,10 @@ class CoreFarmer:
             projected_hp_damage > 0 and core_survival_margin > 0
         )
         cargo_waiting = self._should_wait_for_cargo(turn, context)
+        cargo_on_core = any(
+            worker.cargo > 0 and worker.position == core.position
+            for worker in turn.workers
+        )
         if (
             turn.resources >= 1
             and core_survival_margin > 0
@@ -6061,15 +6485,20 @@ class CoreFarmer:
             core.wait()
             return
 
-
         alliance_rally_target = self._alliance_rally_target(turn)
+        if (
+            alliance_rally_target is not None
+            and self._migration_delivery_pause(turn)
+        ):
+            core.wait()
+            return
         if (
             alliance_rally_target is not None
             and core.hp == 5
             and core.shield >= 5
             and not retreat_enemies
             and not self.combat_pressure_active
-            and not cargo_waiting
+            and not cargo_on_core
             and self._start_alliance_rally(
                 turn,
                 context,
@@ -6614,6 +7043,16 @@ def play(
                     if isinstance(production, Mapping)
                     else None
                 )
+                alliance_config = control_config.get("alliance")
+                tactic.alliance_rally_radius = (
+                    int(alliance_config["rally_radius"])
+                    if isinstance(alliance_config, Mapping)
+                    else ALLY_CORE_RALLY_RADIUS
+                )
+                tactic.manual_core_order_active = any(
+                    str(order.get("unit_type")) == "CORE"
+                    for order in active_orders
+                )
                 tactic.revenge_usernames = (
                     set(history.revenge_usernames()) if history is not None else set()
                 )
@@ -6655,6 +7094,8 @@ def play(
                     try:
                         history.record(
                             turn,
+                            allied_object_ids=tuple(tactic.allied_object_ids),
+                            allied_usernames=tuple(tactic.allied_usernames),
                             strategy={
                                 "phase": tactic.strategy_phase(turn),
                                 "posture": tactic.threat_assessment.global_posture.value,

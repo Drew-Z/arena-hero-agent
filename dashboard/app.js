@@ -32,6 +32,8 @@ const ui = {
   cursorPosition: document.querySelector("#cursor-position"),
   productionForm: document.querySelector("#production-form"),
   productionStatus: document.querySelector("#production-status"),
+  allianceForm: document.querySelector("#alliance-form"),
+  allianceStatus: document.querySelector("#alliance-status"),
   expeditionForm: document.querySelector("#expedition-form"),
   expeditionStatus: document.querySelector("#expedition-status"),
   expeditionList: document.querySelector("#expedition-list"),
@@ -72,7 +74,7 @@ const state = {
   pointerStart: null,
   pickingTarget: false,
   orderTarget: null,
-  controlConfig: { production: null, expeditions: [] },
+  controlConfig: { production: null, alliance: { rally_radius: 12 }, expeditions: [] },
   layers: { explored: true, obstacles: true, resources: true, history: true, routes: false },
   pickMode: null,
   viewport: { width: 1, height: 1 },
@@ -338,7 +340,7 @@ function draw() {
     if (item.id) objectById.set(item.id, item);
   }
   for (const item of objects) {
-    if (allianceIds.has(item.id)) continue;
+    if (allianceIds.has(item.id) || item.relation === "ALLY") continue;
     if (item.kind === "CORE") drawCore(item, item.controlled ? "friendly" : "enemy");
     if (item.kind === "UNIT") drawUnit(item, item.controlled ? "friendly" : "enemy");
   }
@@ -411,7 +413,9 @@ function updateMetrics() {
   const workers = units.filter((item) => item.unit_type === "WORKER").length;
   const vanguards = units.filter((item) => item.unit_type === "VANGUARD").length;
   const rangers = units.filter((item) => item.unit_type === "RANGER").length;
-  const enemies = game.objects.filter((item) => item.controlled === false).length;
+  const enemies = Number.isInteger(overview.enemy_count)
+    ? overview.enemy_count
+    : game.objects.filter((item) => item.controlled === false && item.relation !== "ALLY").length;
   ui.tick.textContent = overview.tick;
   ui.resources.textContent = `${game.resources}/${Math.max(10, game.population * 5)}`;
   ui.population.textContent = game.population;
@@ -719,6 +723,10 @@ async function refreshControl() {
       document.querySelector("#production-vanguard").value = production.vanguard_weight;
       document.querySelector("#production-ranger").value = production.ranger_weight;
     }
+    const alliance = controlConfig.alliance;
+    if (alliance && document.activeElement?.form !== ui.allianceForm) {
+      document.querySelector("#alliance-rally-radius").value = alliance.rally_radius;
+    }
   } catch (error) {
     ui.orderStatus.textContent = `调兵接口错误 · ${error.message}`;
   }
@@ -909,6 +917,24 @@ ui.productionForm.addEventListener("submit", async (event) => {
     await refreshControl();
   } catch (error) {
     ui.productionStatus.textContent = `保存失败 · ${error.message}`;
+  }
+});
+
+ui.allianceForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const payload = {
+    rally_radius: Number(document.querySelector("#alliance-rally-radius").value),
+  };
+  try {
+    const response = await fetch("/api/alliance-config", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.message || response.statusText);
+    ui.allianceStatus.textContent = `靠拢距离已设为 ${result.rally_radius} 格，将在下个 Tick 生效`;
+    await refreshControl();
+  } catch (error) {
+    ui.allianceStatus.textContent = `保存失败 · ${error.message}`;
   }
 });
 
