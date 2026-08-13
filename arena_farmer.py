@@ -1997,6 +1997,9 @@ class CoreFarmer:
             for peer in peers
             if peer.account_id != coordinator.account_id and peer.username
         }
+        self.revenge_usernames.difference_update(
+            username.casefold() for username in self.allied_usernames
+        )
         self.allied_occupied_cells = {
             position
             for peer in peers
@@ -6391,6 +6394,8 @@ def play(
                     try:
                         history.record(
                             turn,
+                            allied_object_ids=tuple(tactic.allied_object_ids),
+                            allied_usernames=tuple(tactic.allied_usernames),
                             strategy={
                                 "phase": tactic.strategy_phase(turn),
                                 "posture": tactic.threat_assessment.global_posture.value,

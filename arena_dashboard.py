@@ -169,6 +169,57 @@ class DashboardApplication:
             ),
         )
 
+    def alliance_identity(self) -> tuple[frozenset[str], frozenset[str]]:
+        objects = self.alliance_objects()
+        return (
+            frozenset(str(item["id"]) for item in objects),
+            frozenset(
+                str(item.get("owner_username", "")).casefold()
+                for item in objects
+                if str(item.get("owner_username", "")).strip()
+            ),
+        )
+
+    def overview(self, **kwargs: object) -> dict[str, object]:
+        overview = read_overview(self.history_db, **kwargs)
+        alliance_objects = self.alliance_objects()
+        allied_ids = {str(item["id"]) for item in alliance_objects}
+        allied_usernames = {
+            str(item.get("owner_username", "")).casefold()
+            for item in alliance_objects
+            if str(item.get("owner_username", "")).strip()
+        }
+
+        def is_ally(item: object) -> bool:
+            if not isinstance(item, dict):
+                return False
+            return str(item.get("id", item.get("core_id", ""))) in allied_ids or (
+                item.get("kind", "CORE") == "CORE"
+                and str(item.get("owner_username", "")).casefold()
+                in allied_usernames
+            )
+
+        state = overview.get("state")
+        objects = state.get("objects", []) if isinstance(state, dict) else []
+        if isinstance(objects, list):
+            for item in objects:
+                if is_ally(item):
+                    item["relation"] = "ALLY"
+        history = overview.get("enemy_core_history")
+        if isinstance(history, list):
+            overview["enemy_core_history"] = [
+                item for item in history if not is_ally(item)
+            ]
+        overview["enemy_count"] = sum(
+            isinstance(item, dict)
+            and item.get("kind") in {"CORE", "UNIT"}
+            and item.get("controlled") is False
+            and not is_ally(item)
+            for item in objects
+        )
+        overview["alliance_objects"] = alliance_objects
+        return overview
+
     def leaderboard(self) -> dict[str, object]:
         now = time.monotonic()
         with self._leaderboard_lock:
@@ -231,13 +282,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
                 return
             include_history = values.get("history", ["1"])[0] != "0"
-            overview = read_overview(
-                    self.server.app.history_db,
+            overview = self.server.app.overview(
                     tick=tick,
                     since_tick=since_tick,
                     include_history=include_history,
                 )
-            overview["alliance_objects"] = self.server.app.alliance_objects()
             self._send_json(overview)
             return
         if parsed.path == "/api/leaderboard":
@@ -247,7 +296,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json(list_unit_orders(self.server.app.history_db))
             return
         if parsed.path == "/api/kills":
-            self._send_json(read_kill_stats(self.server.app.history_db))
+            _, allied_usernames = self.server.app.alliance_identity()
+            self._send_json(
+                read_kill_stats(
+                    self.server.app.history_db,
+                    excluded_usernames=tuple(allied_usernames),
+                )
+            )
             return
         if parsed.path == "/api/control-config":
             self._send_json(read_control_config(self.server.app.history_db))

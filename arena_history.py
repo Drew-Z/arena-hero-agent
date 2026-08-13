@@ -274,9 +274,14 @@ def _record_combat_events(
     connection: sqlite3.Connection,
     state: Mapping[str, Any],
     snapshot_tick: int,
+    *,
+    allied_object_ids: frozenset[str] = frozenset(),
+    allied_usernames: frozenset[str] = frozenset(),
 ) -> None:
     for event in state.get("events", []):
         if not isinstance(event, dict) or not event.get("event_id"):
+            continue
+        if str(event.get("actor_id", "")) in allied_object_ids:
             continue
         event_id = str(event["event_id"])
         event_tick = int(event.get("tick", snapshot_tick))
@@ -288,7 +293,10 @@ def _record_combat_events(
         records: list[tuple[str, str, str, str]] = []
         if event_type == "DESTRUCTION_PARTICIPATION":
             target_kind = str(event.get("reason_code", ""))
-            if target_kind in {"UNIT", "CORE"}:
+            if (
+                target_kind in {"UNIT", "CORE"}
+                and str(event.get("target_id", "")) not in allied_object_ids
+            ):
                 username = (
                     _enemy_core_username(
                         connection,
@@ -307,14 +315,20 @@ def _record_combat_events(
         elif event_type == "CORE_DESTROYED" and event.get("reason_code") == "ATTACK":
             attackers = values.get("destroyed_by")
             usernames = (
-                [str(username) for username in attackers if str(username).strip()]
+                [
+                    str(username)
+                    for username in attackers
+                    if str(username).strip()
+                    and str(username).casefold() not in allied_usernames
+                ]
                 if isinstance(attackers, list)
                 else []
             )
-            records.extend(
-                ("SUFFERED", "CORE", "DESTROYED", username)
-                for username in (usernames or [""])
-            )
+            if not isinstance(attackers, list) or usernames:
+                records.extend(
+                    ("SUFFERED", "CORE", "DESTROYED", username)
+                    for username in (usernames or [""])
+                )
         for direction, target_kind, outcome, username in records:
             connection.execute(
                 """
@@ -443,6 +457,8 @@ class HistoryRecorder:
         turn: object,
         *,
         strategy: Mapping[str, object] | None = None,
+        allied_object_ids: Sequence[object] = (),
+        allied_usernames: Sequence[str] = (),
     ) -> None:
         tick = int(getattr(turn, "tick"))
         state = getattr(turn, "state").model_dump(mode="json", exclude_none=True)
@@ -469,12 +485,20 @@ class HistoryRecorder:
             for raw_position in item.get("positions", [])
             if (position := _position(raw_position)) is not None
         }
+        allied_ids = frozenset(str(identifier) for identifier in allied_object_ids)
+        allied_names = frozenset(
+            str(username).casefold()
+            for username in allied_usernames
+            if str(username).strip()
+        )
         enemy_cores = [
             item
             for item in objects
             if isinstance(item, dict)
             and item.get("kind") == "CORE"
             and item.get("controlled") is False
+            and str(item.get("id", "")) not in allied_ids
+            and str(item.get("owner_username", "")).casefold() not in allied_names
             and _position(item.get("position")) is not None
         ]
         with self.connection:
@@ -522,7 +546,13 @@ class HistoryRecorder:
                         str(item.get("state", "UNKNOWN")),
                     ),
                 )
-            _record_combat_events(self.connection, state, tick)
+            _record_combat_events(
+                self.connection,
+                state,
+                tick,
+                allied_object_ids=allied_ids,
+                allied_usernames=allied_names,
+            )
             cutoff = self.connection.execute(
                 "SELECT tick FROM snapshots ORDER BY tick DESC LIMIT 1 OFFSET ?",
                 (self.limit - 1,),
@@ -872,7 +902,12 @@ def delete_expedition(path: Path, expedition_id: int) -> None:
         connection.commit()
 
 
-def read_kill_stats(path: Path, *, recent_limit: int = 32) -> dict[str, object]:
+def read_kill_stats(
+    path: Path,
+    *,
+    recent_limit: int = 32,
+    excluded_usernames: Sequence[str] = (),
+) -> dict[str, object]:
     if not path.is_file():
         return {
             "available": False,
@@ -900,6 +935,17 @@ def read_kill_stats(path: Path, *, recent_limit: int = 32) -> dict[str, object]:
                 "losses": [],
                 "revenge_targets": [],
             }
+    excluded_names = {
+        str(username).casefold()
+        for username in excluded_usernames
+        if str(username).strip()
+    }
+    rows = [
+        row
+        for row in rows
+        if not row["username"]
+        or str(row["username"]).casefold() not in excluded_names
+    ]
     dealt = [row for row in rows if row["direction"] == "DEALT"]
     suffered = [row for row in rows if row["direction"] == "SUFFERED"]
     unit_participations = sum(row["target_kind"] == "UNIT" for row in dealt)

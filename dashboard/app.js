@@ -338,7 +338,7 @@ function draw() {
     if (item.id) objectById.set(item.id, item);
   }
   for (const item of objects) {
-    if (allianceIds.has(item.id)) continue;
+    if (allianceIds.has(item.id) || item.relation === "ALLY") continue;
     if (item.kind === "CORE") drawCore(item, item.controlled ? "friendly" : "enemy");
     if (item.kind === "UNIT") drawUnit(item, item.controlled ? "friendly" : "enemy");
   }
@@ -411,7 +411,9 @@ function updateMetrics() {
   const workers = units.filter((item) => item.unit_type === "WORKER").length;
   const vanguards = units.filter((item) => item.unit_type === "VANGUARD").length;
   const rangers = units.filter((item) => item.unit_type === "RANGER").length;
-  const enemies = game.objects.filter((item) => item.controlled === false).length;
+  const enemies = Number.isInteger(overview.enemy_count)
+    ? overview.enemy_count
+    : game.objects.filter((item) => item.controlled === false && item.relation !== "ALLY").length;
   ui.tick.textContent = overview.tick;
   ui.resources.textContent = `${game.resources}/${Math.max(10, game.population * 5)}`;
   ui.population.textContent = game.population;

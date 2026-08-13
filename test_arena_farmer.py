@@ -380,6 +380,7 @@ class AllianceCoordinatorTests(unittest.TestCase):
                 beacon_policy="hold",
                 alliance_coordinator=local,
             )
+            tactic.revenge_usernames = {"ally", "rival"}
 
             tactic.choose_actions(turn)
 
@@ -387,6 +388,7 @@ class AllianceCoordinatorTests(unittest.TestCase):
             self.assertEqual(tactic._hostile_enemies(turn), ())
             self.assertEqual(tactic.allied_occupied_cells, {(2, 0), (3, 0)})
             self.assertFalse(tactic.combat_pressure_active)
+            self.assertEqual(tactic.revenge_usernames, {"rival"})
             self.assertIsNone(tactic.isolated_core_target_id)
             self.assertNotIn("START_MOVE", str(queued.get("core_action", {})))
 

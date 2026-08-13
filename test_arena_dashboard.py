@@ -265,6 +265,42 @@ class HistoryTests(unittest.TestCase):
                 ],
             )
 
+    def test_allies_are_excluded_from_enemy_and_combat_history(self) -> None:
+        events = [
+            {
+                "event_id": "20000000-0000-4000-8000-000000000020",
+                "tick": 41,
+                "event_type": "DESTRUCTION_PARTICIPATION",
+                "reason_code": "CORE",
+                "target_id": ENEMY_CORE_ID,
+                "position": [4, 0],
+            },
+            {
+                "event_id": "20000000-0000-4000-8000-000000000021",
+                "tick": 41,
+                "event_type": "CORE_DESTROYED",
+                "reason_code": "ATTACK",
+                "target_id": CORE_ID,
+                "position": [0, 0],
+                "values": {"destroyed_by": ["ally"]},
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            with HistoryRecorder(path) as recorder:
+                recorder.record(
+                    make_turn(events=events),
+                    allied_object_ids=[ENEMY_CORE_ID],
+                    allied_usernames=["ally", "target"],
+                )
+
+            overview = read_overview(path)
+            stats = read_kill_stats(path, excluded_usernames=["ally", "target"])
+            self.assertEqual(overview["enemy_core_history"], [])
+            self.assertEqual(stats["total_participations"], 0)
+            self.assertEqual(stats["attacks_received"], 0)
+            self.assertEqual(stats["revenge_targets"], [])
+
     def test_records_and_reads_tactical_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.sqlite3"
@@ -408,6 +444,47 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual([item["kind"] for item in objects], ["CORE", "UNIT"])
             self.assertTrue(all(item["alliance_account_id"] == "account-2" for item in objects))
             self.assertEqual(objects[0]["position"], [7, 8])
+
+    def test_overview_excludes_allies_from_enemy_count_and_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            history = root / "history.sqlite3"
+            with HistoryRecorder(history) as recorder:
+                recorder.record(make_turn())
+            alliance = root / "alliance"
+            alliance.mkdir()
+            (alliance / "account-2.json").write_text(
+                json.dumps(
+                    {
+                        "account_id": "account-2",
+                        "username": "target",
+                        "updated_at": time.time(),
+                        "core_id": ENEMY_CORE_ID,
+                        "core_position": [4, 0],
+                        "units": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            static = root / "dashboard"
+            static.mkdir()
+            app = DashboardApplication(
+                history_db=history,
+                static_root=static,
+                alliance_directory=alliance,
+                alliance_account_id="account-1",
+            )
+
+            overview = app.overview()
+
+            allied_core = next(
+                item
+                for item in overview["state"]["objects"]
+                if item.get("id") == ENEMY_CORE_ID
+            )
+            self.assertEqual(allied_core["relation"], "ALLY")
+            self.assertEqual(overview["enemy_count"], 0)
+            self.assertEqual(overview["enemy_core_history"], [])
 
     def test_order_endpoint_accepts_coordinate_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
