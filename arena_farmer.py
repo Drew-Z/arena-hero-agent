@@ -96,6 +96,8 @@ CORE_RAID_RALLY_TIMEOUT_TICKS = 12
 CORE_TARGET_DURABILITY_WEIGHT = 2
 CORE_TARGET_PROTECTOR_HP_WEIGHT = 3
 ISOLATED_CORE_CONFIRM_TICKS = 2
+STALLED_CORE_CONFIRM_TICKS = 3
+STALLED_CORE_NEARBY_RADIUS = 5
 CORE_VISIBILITY_GAP_TICKS = 2
 CORE_RAID_STRIKE_MAX_DISTANCE = 256
 CORE_RAID_STRIKE_RELEASE_DISTANCE = 320
@@ -297,6 +299,7 @@ class CoreRaidTarget:
     id: UUID
     position: Position
     visible_enemy: object | None
+    stalled: bool = False
 
 
 @dataclass(slots=True)
@@ -647,10 +650,12 @@ def _core_raid_strike_distance(
     vanguards: Sequence[object],
     rangers: Sequence[object],
 ) -> int:
-    return max(
-        min(_distance(defender.position, position) for defender in vanguards),
-        min(_distance(defender.position, position) for defender in rangers),
-    )
+    nearest = [
+        min(_distance(defender.position, position) for defender in units)
+        for units in (vanguards, rangers)
+        if units
+    ]
+    return max(nearest, default=SIGNED_INT64_MAX)
 
 
 def _minimum_cost_assignment(costs: Sequence[Sequence[int]]) -> tuple[int, ...]:
@@ -1934,6 +1939,7 @@ class CoreFarmer:
         self.healing_defender_ids: set[UUID] = set()
         self.stationary_core_memory: dict[UUID, EnemyCoreSighting] = {}
         self.isolated_core_target_id: UUID | None = None
+        self.core_raid_stalled = False
         self.core_raid_rally_position: Position | None = None
         self.core_raid_launched = False
         self.core_raid_started_tick: int | None = None
@@ -2144,6 +2150,7 @@ class CoreFarmer:
     def _release_core_raid(self, *, forget_position: bool = False) -> None:
         target_id = self.isolated_core_target_id
         self.isolated_core_target_id = None
+        self.core_raid_stalled = False
         self.core_raid_rally_position = None
         self.core_raid_launched = False
         self.core_raid_started_tick = None
@@ -2578,6 +2585,7 @@ class CoreFarmer:
                 and sighting.position == enemy_unit.position
             ):
                 sighting.last_tick = turn.tick
+                sighting.observations += 1
             else:
                 self.enemy_unit_sightings[unit_id] = EnemyCoreSighting(
                     position=enemy_unit.position,
@@ -2798,6 +2806,41 @@ class CoreFarmer:
                     observations=current_sighting.observations,
                 )
 
+    def _core_and_nearby_units_stalled(
+        self,
+        turn: Turn,
+        enemy_core: object,
+    ) -> bool:
+        """Confirm that a visible Core and its local units stayed put for 3 ticks."""
+        if enemy_core.state is not CoreState.NORMAL:
+            return False
+        core_sighting = self.enemy_core_sightings.get(enemy_core.id)
+        if (
+            core_sighting is None
+            or core_sighting.position != enemy_core.position
+            or core_sighting.last_tick != turn.tick
+            or core_sighting.observations < STALLED_CORE_CONFIRM_TICKS
+            or core_sighting.last_tick - core_sighting.first_tick
+            != core_sighting.observations - 1
+        ):
+            return False
+        nearby_units = (
+            enemy
+            for enemy in self._hostile_enemies(turn)
+            if getattr(enemy, "kind", None) != "CORE"
+            and _distance(enemy.position, enemy_core.position)
+            <= STALLED_CORE_NEARBY_RADIUS
+        )
+        return all(
+            (sighting := self.enemy_unit_sightings.get(enemy.id)) is not None
+            and sighting.position == enemy.position
+            and sighting.last_tick == turn.tick
+            and sighting.observations >= STALLED_CORE_CONFIRM_TICKS
+            and sighting.last_tick - sighting.first_tick
+            == sighting.observations - 1
+            for enemy in nearby_units
+        )
+
     def _select_isolated_core_target(self, turn: Turn) -> CoreRaidTarget | None:
         core = turn.core
         mature_fleet = (
@@ -2815,17 +2858,19 @@ class CoreFarmer:
                 EARLY_ASSAULT_MIN_RANGERS,
             )
         )
-        if (
-            len(turn.vanguards) < minimum_vanguards
-            or len(turn.rangers) < minimum_rangers
-        ):
-            self._release_core_raid()
-            return None
+        full_assault_ready = (
+            len(turn.vanguards) >= minimum_vanguards
+            and len(turn.rangers) >= minimum_rangers
+        )
 
         guard_vanguards, guard_rangers = _core_guard_ids(turn)
         reserve_vanguards, reserve_rangers = _core_reserve_ids(turn)
 
-        def strike_groups(position: Position) -> tuple[tuple[object, ...], tuple[object, ...]]:
+        def strike_groups(
+            position: Position,
+            *,
+            stalled: bool = False,
+        ) -> tuple[tuple[object, ...], tuple[object, ...]]:
             vanguards = sorted(
                 (
                     unit
@@ -2842,6 +2887,8 @@ class CoreFarmer:
                 ),
                 key=lambda unit: (_distance(unit.position, position), _uuid_sort_key(unit)),
             )
+            if stalled:
+                return tuple(vanguards), tuple(rangers)
             if not mature_fleet:
                 vanguards = sorted(
                     (unit for unit in turn.vanguards if unit.id not in guard_vanguards),
@@ -2860,6 +2907,11 @@ class CoreFarmer:
             enemy.id: enemy
             for enemy in self._hostile_enemies(turn)
             if getattr(enemy, "kind") == "CORE"
+        }
+        stalled_core_ids = {
+            enemy.id
+            for enemy in visible_cores.values()
+            if self._core_and_nearby_units_stalled(turn, enemy)
         }
 
         if self.isolated_core_target_id is not None:
@@ -2883,9 +2935,22 @@ class CoreFarmer:
                     ),
                 )
                 self.stationary_core_memory[target_id] = remembered
+            stalled_target = self.core_raid_stalled
+            if visible_target is not None:
+                if self.core_raid_stalled and target_id in stalled_core_ids:
+                    stalled_target = True
+                elif not full_assault_ready:
+                    self._release_core_raid()
+                    return None
+                else:
+                    stalled_target = False
             vanguard_strike_group, ranger_strike_group = strike_groups(
-                remembered.position if remembered is not None else core.position
+                remembered.position if remembered is not None else core.position,
+                stalled=stalled_target,
             )
+            if not vanguard_strike_group and not ranger_strike_group:
+                self._release_core_raid()
+                return None
             release_target = (
                 remembered is None
                 or turn.tick - remembered.last_tick > CORE_RAID_MEMORY_TTL
@@ -2909,17 +2974,28 @@ class CoreFarmer:
                 self._release_core_raid(forget_position=forget_position)
             else:
                 assert remembered is not None
+                self.core_raid_stalled = stalled_target
                 return CoreRaidTarget(
                     id=target_id,
                     position=remembered.position,
                     visible_enemy=visible_target,
+                    stalled=stalled_target,
                 )
 
         candidates = []
         for enemy_core in visible_cores.values():
-            vanguard_strike_group, ranger_strike_group = strike_groups(
-                enemy_core.position
+            stalled_target = (
+                not full_assault_ready
+                and enemy_core.id in stalled_core_ids
             )
+            if not full_assault_ready and not stalled_target:
+                continue
+            vanguard_strike_group, ranger_strike_group = strike_groups(
+                enemy_core.position,
+                stalled=stalled_target,
+            )
+            if not vanguard_strike_group and not ranger_strike_group:
+                continue
             strike_distance = _core_raid_strike_distance(
                 enemy_core.position,
                 vanguard_strike_group,
@@ -2938,12 +3014,15 @@ class CoreFarmer:
                         self._hostile_enemies(turn),
                     ),
                     enemy_core,
+                    stalled_target,
                 )
             )
 
         if not candidates:
             return None
-        target = min(candidates, key=lambda candidate: candidate[:2])[2]
+        selected = min(candidates, key=lambda candidate: candidate[:2])
+        target = selected[2]
+        stalled_target = selected[3]
         sighting = self.enemy_core_sightings.get(target.id)
         self.stationary_core_memory[target.id] = EnemyCoreSighting(
             position=target.position,
@@ -2952,7 +3031,11 @@ class CoreFarmer:
             observations=sighting.observations if sighting is not None else 1,
         )
         self.isolated_core_target_id = target.id
-        vanguard_strike_group, ranger_strike_group = strike_groups(target.position)
+        self.core_raid_stalled = stalled_target
+        vanguard_strike_group, ranger_strike_group = strike_groups(
+            target.position,
+            stalled=stalled_target,
+        )
         self.core_raid_vanguard_ids = {
             unit.id for unit in vanguard_strike_group
         }
@@ -2964,7 +3047,7 @@ class CoreFarmer:
             (*vanguard_strike_group, *ranger_strike_group),
             target.position,
         )
-        self.core_raid_launched = False
+        self.core_raid_launched = stalled_target
         observer_id = self.core_observer_candidates.get(target.id)
         living_empty_workers = {
             worker.id
@@ -2979,6 +3062,7 @@ class CoreFarmer:
             id=target.id,
             position=target.position,
             visible_enemy=target,
+            stalled=stalled_target,
         )
 
     def _stationary_enemy_units(self, turn: Turn) -> tuple[object, ...]:
@@ -4286,6 +4370,19 @@ class CoreFarmer:
                 len(turn.vanguards) >= MATURE_GUARD_FLEET_MIN
                 and len(turn.rangers) >= MATURE_GUARD_FLEET_MIN
             )
+            if target.stalled:
+                return (
+                    {
+                        unit.id
+                        for unit in available_vanguards
+                        if unit.id not in reserve_vanguards
+                    },
+                    {
+                        unit.id
+                        for unit in available_rangers
+                        if unit.id not in reserve_rangers
+                    },
+                )
             if not mature_fleet:
                 return (
                     {unit.id for unit in available_vanguards},
@@ -4587,6 +4684,7 @@ class CoreFarmer:
             id=target_id,
             position=remembered.position,
             visible_enemy=None,
+            stalled=self.core_raid_stalled,
         )
 
     def _strike_group_locally_threatened(

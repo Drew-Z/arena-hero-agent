@@ -4102,6 +4102,129 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertIsNone(tactic._select_isolated_core_target(turn))
         self.assertIsNone(tactic.isolated_core_target_id)
 
+    def test_stalled_core_uses_patrol_force_after_three_ticks(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        vanguards = [
+            unit(
+                f"00000000-0000-4000-8000-{200 + index:012x}",
+                "VANGUARD",
+                (index, 0) if index <= 3 else (6 + index, 0),
+            )
+            for index in range(1, 6)
+        ]
+        rangers = [
+            unit(
+                f"00000000-0000-4000-8000-{300 + index:012x}",
+                "RANGER",
+                (index, 1) if index <= 4 else (5 + index, 1),
+            )
+            for index in range(1, 8)
+        ]
+        enemies = [
+            enemy_core(ENEMY_1, (40, 0)),
+            unit(ENEMY_2, "WORKER", (41, 0), controlled=False),
+        ]
+
+        for tick in (100, 101):
+            turn = make_turn(tick=tick, units=vanguards + rangers, enemies=enemies)
+            tactic.choose_actions(turn)
+            self.assertIsNone(tactic.isolated_core_target_id)
+
+        turn = make_turn(tick=102, units=vanguards + rangers, enemies=enemies)
+        tactic.choose_actions(turn)
+
+        guards = _core_guard_ids(turn)
+        reserves = _core_reserve_ids(turn)
+        strike_vanguards = {
+            unit.id for unit in turn.vanguards
+        } - guards[0] - reserves[0]
+        strike_rangers = {
+            unit.id for unit in turn.rangers
+        } - guards[1] - reserves[1]
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)["unit_actions"]
+        self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
+        self.assertTrue(tactic.core_raid_stalled)
+        self.assertTrue(tactic.core_raid_launched)
+        self.assertEqual(tactic.core_raid_vanguard_ids, strike_vanguards)
+        self.assertEqual(tactic.core_raid_ranger_ids, strike_rangers)
+        for unit_id in strike_vanguards | strike_rangers:
+            self.assertEqual(queued[str(unit_id)]["type"], "MOVE")
+        for unit_id in guards[0] | guards[1] | reserves[0] | reserves[1]:
+            self.assertNotIn(unit_id, strike_vanguards | strike_rangers)
+
+    def test_moving_unit_near_stalled_core_blocks_patrol_attack(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        units = [
+            unit(
+                f"00000000-0000-4000-8000-{400 + index:012x}",
+                "VANGUARD" if index <= 5 else "RANGER",
+                (index, 0),
+            )
+            for index in range(1, 13)
+        ]
+        for tick, worker_position in (
+            (100, (41, 0)),
+            (101, (41, 0)),
+            (102, (42, 0)),
+        ):
+            turn = make_turn(
+                tick=tick,
+                units=units,
+                enemies=[
+                    enemy_core(ENEMY_1, (40, 0)),
+                    unit(ENEMY_2, "WORKER", worker_position, controlled=False),
+                ],
+            )
+            tactic.choose_actions(turn)
+
+        self.assertEqual(
+            tactic.enemy_unit_sightings[UUID(ENEMY_2)].observations,
+            1,
+        )
+        self.assertIsNone(tactic.isolated_core_target_id)
+
+    def test_empty_stalled_core_is_attackable_after_three_ticks(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        units = [
+            unit(
+                f"00000000-0000-4000-8000-{500 + index:012x}",
+                "VANGUARD" if index <= 5 else "RANGER",
+                (index, 0),
+            )
+            for index in range(1, 13)
+        ]
+        for tick in (100, 101, 102):
+            turn = make_turn(
+                tick=tick,
+                units=units,
+                enemies=[enemy_core(ENEMY_1, (40, 0))],
+            )
+            tactic.choose_actions(turn)
+
+        self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
+        self.assertTrue(tactic.core_raid_stalled)
+
+    def test_stalled_core_can_be_attacked_by_one_available_unit_type(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        units = [
+            unit(VANGUARD_1, "VANGUARD", (0, 1)),
+            unit(RANGER_1, "RANGER", (0, 2)),
+            unit(RANGER_2, "RANGER", (8, 0)),
+        ]
+        for tick in (100, 101, 102):
+            turn = make_turn(
+                tick=tick,
+                units=units,
+                enemies=[enemy_core(ENEMY_1, (40, 0))],
+            )
+            tactic.choose_actions(turn)
+
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)["unit_actions"]
+        self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
+        self.assertEqual(tactic.core_raid_vanguard_ids, set())
+        self.assertEqual(tactic.core_raid_ranger_ids, {UUID(RANGER_2)})
+        self.assertEqual(queued[RANGER_2]["type"], "MOVE")
+
     def test_unit_assault_falls_back_to_same_type_pair(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
         turn = make_turn(
