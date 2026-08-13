@@ -2198,6 +2198,33 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertEqual(queued["core_action"]["type"], "CANCEL_MOVE")
         self.assertEqual(tactic.last_core_cancel_reason, "DESTINATION_BLOCKED")
 
+    def test_moving_core_clears_units_from_destination_without_cancelling(self) -> None:
+        tactic = CoreFarmer(worker_target=2, beacon_policy="retreat")
+        moving = make_turn(
+            tick=100,
+            core_state="MOVING",
+            move_direction="LEFT",
+            move_progress=2,
+            move_destination=(-1, 0),
+            beacon_position=(10, 0),
+            units=[
+                unit(WORKER_1, "WORKER", (-1, 0), cargo=1),
+                unit(WORKER_2, "WORKER", (-1, 0), cargo=1),
+            ],
+        )
+
+        tactic.choose_actions(moving)
+
+        queued = moving.plan.model_dump(mode="json", exclude_none=True)
+        self.assertNotIn("core_action", queued)
+        self.assertEqual(tactic.last_core_cancel_reason, "NONE")
+        self.assertTrue(
+            all(
+                queued["unit_actions"][identifier]["type"] == "MOVE"
+                for identifier in (WORKER_1, WORKER_2)
+            )
+        )
+
     def test_committed_retreat_does_not_cancel_for_beacon_geometry(self) -> None:
         queued = plan(
             make_turn(

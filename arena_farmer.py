@@ -3655,6 +3655,10 @@ class CoreFarmer:
             core_position=core.position,
             preplanned_units=set(),
         )
+        moving_core_lane_units = self._clear_moving_core_destination(
+            turn,
+            context,
+        )
         context.delivery_lane = _select_delivery_lane(context)
         breakout = _is_multi_axis_breakout(
             core.position,
@@ -3744,6 +3748,7 @@ class CoreFarmer:
                 force_departure=reserve_core_for_spawn,
             )
         )
+        preplanned_units.update(moving_core_lane_units)
         context.preplanned_units = preplanned_units
         for worker in workers:
             if worker.id not in preplanned_units:
@@ -5465,7 +5470,7 @@ class CoreFarmer:
         if not directions:
             return False
         lane = _destination(core.position, directions[0])
-        excess = max(0, context.friendly_counts[lane] - 1)
+        excess = context.friendly_counts[lane]
         if excess == 0:
             return False
         core_neighbors = {
@@ -5506,6 +5511,50 @@ class CoreFarmer:
                 return True
         return False
 
+    def _clear_moving_core_destination(
+        self,
+        turn: Turn,
+        context: MovementContext,
+    ) -> set[UUID]:
+        core = turn.core
+        if (
+            core is None
+            or core.view.state is not CoreState.MOVING
+            or core.view.destination is None
+        ):
+            return set()
+        destination = core.view.destination
+        occupants = sorted(
+            (unit for unit in turn.units if unit.position == destination),
+            key=lambda unit: (
+                0 if getattr(unit, "unit_type", None) is UnitType.WORKER else 1,
+                int(getattr(unit, "cargo", 0) > 0),
+                _uuid_sort_key(unit),
+            ),
+        )
+        moved: set[UUID] = set()
+        for unit in occupants:
+            directions = tuple(
+                sorted(
+                    CARDINAL_DIRECTIONS,
+                    key=lambda direction: (
+                        _destination(unit.position, direction) == core.position,
+                        context.friendly_counts[
+                            _destination(unit.position, direction)
+                        ],
+                        -_distance(
+                            _destination(unit.position, direction),
+                            core.position,
+                        ),
+                        CARDINAL_DIRECTIONS.index(direction),
+                    ),
+                )
+            )
+            if _queue_move(unit, directions, context):
+                moved.add(unit.id)
+        context.reserved_destinations.add(destination)
+        return moved
+
     def _moving_core_should_cancel(
         self,
         turn: Turn,
@@ -5521,7 +5570,17 @@ class CoreFarmer:
 
         self.last_core_cancel_reason = "NONE"
         destination = core.view.destination
-        if destination in self._core_blocked_cells(turn, context):
+        fixed_blocked = (
+            set(context.obstacles)
+            | set(context.enemy_cells)
+            | set(context.danger_cells)
+            | set(context.allied_cells)
+            | set(turn.resource_cells)
+        )
+        if destination in fixed_blocked:
+            self.last_core_cancel_reason = "DESTINATION_BLOCKED"
+            return True
+        if context.friendly_counts[destination] > 0:
             self.last_core_cancel_reason = "DESTINATION_BLOCKED"
             return True
 
