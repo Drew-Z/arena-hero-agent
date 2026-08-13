@@ -137,6 +137,8 @@ CORE_BULK_CARGO_ETA = 4
 CORE_BULK_CARGO = 3
 CORE_CONGESTED_CARGO = 3
 CORE_DELIVERY_CHAIN_MAX = 8
+CORE_MIGRATION_DELIVERY_BACKLOG = 6
+CORE_MIGRATION_DELIVERY_TICKS = 6
 CORE_EVADE_TRIGGER_DISTANCE = 12
 CORE_EVADE_RELEASE_DISTANCE = CORE_EVADE_TRIGGER_DISTANCE + 2
 CORE_MOVE_COMMIT_PROGRESS = 2
@@ -4011,6 +4013,14 @@ class CoreFarmer:
                     self.active_core_move_reason = None
                     completed.append(order_id)
                     continue
+                if (
+                    core.view.state is CoreState.NORMAL
+                    and self._migration_delivery_pause(turn)
+                ):
+                    core.wait()
+                    self.active_core_move_reason = None
+                    active_ids.append(order_id)
+                    continue
                 blocked = self._core_blocked_cells(turn, context) | set(
                     context.danger_cells
                 )
@@ -5353,6 +5363,21 @@ class CoreFarmer:
             )
         )
 
+    def _migration_delivery_pause(self, turn: Turn) -> bool:
+        """Provide a bounded delivery window between Core migration steps."""
+        core = turn.core
+        if core is None or turn.resource_space <= 0:
+            return False
+        cargo_workers = [worker for worker in turn.workers if worker.cargo > 0]
+        if any(worker.position == core.position for worker in cargo_workers):
+            return True
+        return (
+            len(cargo_workers) >= CORE_MIGRATION_DELIVERY_BACKLOG
+            and 0
+            <= turn.tick - self.last_core_move_tick
+            <= CORE_MIGRATION_DELIVERY_TICKS
+        )
+
     def _core_blocked_cells(
         self,
         turn: Turn,
@@ -5966,8 +5991,13 @@ class CoreFarmer:
             core.wait()
             return
 
-
         alliance_rally_target = self._alliance_rally_target(turn)
+        if (
+            alliance_rally_target is not None
+            and self._migration_delivery_pause(turn)
+        ):
+            core.wait()
+            return
         if (
             alliance_rally_target is not None
             and core.hp == 5

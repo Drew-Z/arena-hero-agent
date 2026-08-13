@@ -777,6 +777,94 @@ class CoreFarmerTests(unittest.TestCase):
         )
         self.assertEqual(tactic.active_core_move_reason, "MANUAL_ORDER")
 
+    def test_dashboard_core_order_pauses_for_bounded_delivery_window(self) -> None:
+        cargo_workers = [
+            unit(identifier, "WORKER", (-10 - index, index), cargo=1)
+            for index, identifier in enumerate(
+                (WORKER_1, WORKER_2, WORKER_3, WORKER_4, WORKER_5, WORKER_6)
+            )
+        ]
+        tactic = CoreFarmer(worker_target=6, beacon_policy="hold")
+        tactic.last_core_move_tick = 100
+        order = {
+            "id": 13,
+            "unit_type": "CORE",
+            "unit_count": 1,
+            "unit_ids": [CORE_ID],
+            "target_x": 20,
+            "target_y": 0,
+        }
+
+        paused = make_turn(tick=103, units=cargo_workers)
+        tactic.choose_actions(paused)
+        tactic.apply_unit_orders(paused, [order])
+        paused_plan = paused.plan.model_dump(mode="json", exclude_none=True)
+
+        resumed = make_turn(tick=107, units=cargo_workers)
+        tactic.choose_actions(resumed)
+        tactic.apply_unit_orders(resumed, [order])
+        resumed_plan = resumed.plan.model_dump(mode="json", exclude_none=True)
+
+        self.assertEqual(paused_plan["core_action"], {"type": "WAIT"})
+        self.assertEqual(
+            resumed_plan["core_action"],
+            {"type": "START_MOVE", "direction": "RIGHT"},
+        )
+
+    def test_alliance_rally_pauses_for_bounded_delivery_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            shared = Path(directory)
+            peer_units = [
+                unit(
+                    f"30000000-0000-4000-8000-{index:012d}",
+                    "WORKER",
+                    (20 + index, 20),
+                    cargo=0,
+                )
+                for index in range(7)
+            ]
+            AllianceCoordinator(
+                shared,
+                alliance_id="duo",
+                account_id="account-2",
+                expected_members=2,
+                barrier_timeout_seconds=0,
+            ).publish(
+                make_turn(
+                    tick=103,
+                    core_identifier=ALLY_CORE_ID,
+                    owner_username="ally",
+                    core_position=(0, 30),
+                    units=peer_units,
+                )
+            )
+            cargo_workers = [
+                unit(identifier, "WORKER", (-10 - index, index), cargo=1)
+                for index, identifier in enumerate(
+                    (WORKER_1, WORKER_2, WORKER_3, WORKER_4, WORKER_5, WORKER_6)
+                )
+            ]
+            tactic = CoreFarmer(
+                worker_target=6,
+                beacon_policy="hold",
+                alliance_coordinator=AllianceCoordinator(
+                    shared,
+                    alliance_id="duo",
+                    account_id="account-1",
+                    expected_members=2,
+                    barrier_timeout_seconds=0,
+                ),
+            )
+            tactic.last_core_move_tick = 100
+
+            paused = make_turn(tick=103, units=cargo_workers)
+            tactic.choose_actions(paused)
+
+            self.assertEqual(
+                paused.plan.model_dump(mode="json", exclude_none=True)["core_action"],
+                {"type": "WAIT"},
+            )
+
     def test_alliance_rally_clears_congestion_despite_waiting_cargo(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             shared = Path(directory)
