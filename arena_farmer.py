@@ -2547,7 +2547,11 @@ class CoreFarmer:
 
         hidden_unit_ids = set(self.enemy_unit_sightings) - set(visible_units)
         for unit_id in hidden_unit_ids:
-            self.enemy_unit_sightings.pop(unit_id, None)
+            if (
+                turn.tick - self.enemy_unit_sightings[unit_id].last_tick
+                > CORE_VISIBILITY_GAP_TICKS
+            ):
+                self.enemy_unit_sightings.pop(unit_id, None)
         self.active_enemy_ids.clear()
         self.preemptive_evade_enemy_ids.clear()
         self.pursuing_enemy_ids.clear()
@@ -2581,8 +2585,9 @@ class CoreFarmer:
             sighting = self.enemy_unit_sightings.get(unit_id)
             if (
                 sighting is not None
-                and sighting.last_tick == turn.tick - 1
                 and sighting.position == enemy_unit.position
+                and turn.tick - sighting.last_tick - 1
+                <= CORE_VISIBILITY_GAP_TICKS
             ):
                 sighting.last_tick = turn.tick
                 sighting.observations += 1
@@ -2820,8 +2825,6 @@ class CoreFarmer:
             or core_sighting.position != enemy_core.position
             or core_sighting.last_tick != turn.tick
             or core_sighting.observations < STALLED_CORE_CONFIRM_TICKS
-            or core_sighting.last_tick - core_sighting.first_tick
-            != core_sighting.observations - 1
         ):
             return False
         nearby_units = (
@@ -2836,8 +2839,6 @@ class CoreFarmer:
             and sighting.position == enemy.position
             and sighting.last_tick == turn.tick
             and sighting.observations >= STALLED_CORE_CONFIRM_TICKS
-            and sighting.last_tick - sighting.first_tick
-            == sighting.observations - 1
             for enemy in nearby_units
         )
 

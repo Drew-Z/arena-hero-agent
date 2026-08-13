@@ -4225,6 +4225,34 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertEqual(tactic.core_raid_ranger_ids, {UUID(RANGER_2)})
         self.assertEqual(queued[RANGER_2]["type"], "MOVE")
 
+    def test_stalled_core_confirmation_survives_short_visibility_gaps(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        units = [
+            unit(VANGUARD_1, "VANGUARD", (0, 1)),
+            unit(RANGER_1, "RANGER", (0, 2)),
+            unit(RANGER_2, "RANGER", (38, 4)),
+        ]
+        enemies = [
+            enemy_core(ENEMY_1, (40, 0)),
+            unit(ENEMY_2, "WORKER", (40, 0), controlled=False),
+        ]
+        for tick in (100, 101, 102, 103, 104):
+            turn = make_turn(
+                tick=tick,
+                units=units,
+                enemies=enemies if tick in {100, 102, 104} else [],
+            )
+            tactic.choose_actions(turn)
+
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)["unit_actions"]
+        self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
+        self.assertTrue(tactic.core_raid_stalled)
+        self.assertEqual(
+            tactic.enemy_unit_sightings[UUID(ENEMY_2)].observations,
+            3,
+        )
+        self.assertEqual(queued[RANGER_2]["type"], "MOVE")
+
     def test_unit_assault_falls_back_to_same_type_pair(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
         turn = make_turn(
