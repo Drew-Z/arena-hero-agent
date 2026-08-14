@@ -121,6 +121,16 @@
               <option value="RANGER">游侠</option>
             </select>
           </label>
+          <label>单位范围
+            <select id="order-selection-mode">
+              <option value="MANUAL">手工选择</option>
+              <option value="DISTANT">远离 Core X 格</option>
+              <option value="ALL">全部</option>
+            </select>
+          </label>
+          <label id="order-distance-field" class="hidden">距离 Core 至少（格）
+            <input id="order-min-distance" type="number" min="0" max="1000000" step="1" value="50">
+          </label>
           <fieldset class="unit-picker-field">
             <legend>选择具体核心或单位</legend>
             <div id="order-unit-list" class="unit-picker"></div>

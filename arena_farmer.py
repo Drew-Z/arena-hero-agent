@@ -10,6 +10,7 @@ import socket
 import sys
 import threading
 import time
+import urllib.request
 from collections import Counter, deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack
@@ -148,6 +149,7 @@ CORE_BULK_CARGO = 3
 CORE_CONGESTED_CARGO = 3
 CORE_DELIVERY_CHAIN_MAX = 8
 CORE_MIGRATION_DELIVERY_BACKLOG = 6
+CORE_MIGRATION_VISIBLE_CARGO = 5
 CORE_MIGRATION_DELIVERY_TICKS = 6
 CORE_EVADE_TRIGGER_DISTANCE = 12
 CORE_EVADE_RELEASE_DISTANCE = CORE_EVADE_TRIGGER_DISTANCE + 2
@@ -344,6 +346,135 @@ class AlliancePeer:
     unit_ids: frozenset[UUID]
     unit_positions: frozenset[Position]
     updated_at: float
+
+
+@dataclass(slots=True, frozen=True)
+class AllianceRosterSnapshot:
+    tick: int
+    usernames: frozenset[str]
+    object_ids: frozenset[UUID]
+    object_positions: tuple[tuple[UUID, Position], ...]
+
+
+def _roster_position(value: object) -> Position | None:
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or isinstance(value[0], bool)
+        or isinstance(value[1], bool)
+        or not isinstance(value[0], int)
+        or not isinstance(value[1], int)
+    ):
+        return None
+    position = value[0], value[1]
+    return position if _is_signed_int64_position(position) else None
+
+
+def _parse_alliance_roster(payload: object) -> AllianceRosterSnapshot:
+    if not isinstance(payload, Mapping) or payload.get("success") is not True:
+        raise ValueError("alliance roster response was unsuccessful")
+    data = payload.get("data")
+    if not isinstance(data, Mapping):
+        raise ValueError("alliance roster data must be an object")
+    tick = data.get("tick")
+    if isinstance(tick, bool) or not isinstance(tick, int) or tick < 0:
+        raise ValueError("alliance roster tick must be a non-negative integer")
+    raw_names = data.get("gameUsernames")
+    raw_allies = data.get("allies")
+    if not isinstance(raw_names, list) or not isinstance(raw_allies, list):
+        raise ValueError("alliance roster names and allies must be lists")
+    if any(not isinstance(value, str) for value in raw_names):
+        raise ValueError("alliance roster usernames must be strings")
+
+    object_ids: set[UUID] = set()
+    positions: dict[UUID, Position] = {}
+    for ally in raw_allies:
+        if not isinstance(ally, Mapping):
+            raise ValueError("alliance roster member must be an object")
+        raw_ids = ally.get("objectIds")
+        raw_units = ally.get("units")
+        if not isinstance(raw_ids, list) or not isinstance(raw_units, list):
+            raise ValueError("alliance roster member IDs and units must be lists")
+        try:
+            object_ids.update(UUID(value) for value in raw_ids)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("alliance roster contains an invalid object ID") from exc
+        raw_objects = [ally.get("core"), *raw_units]
+        for raw_object in raw_objects:
+            if raw_object is None:
+                continue
+            if not isinstance(raw_object, Mapping):
+                raise ValueError("alliance roster object must be an object")
+            try:
+                identifier = UUID(raw_object["id"])
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                raise ValueError("alliance roster contains an invalid positioned ID") from exc
+            object_ids.add(identifier)
+            if "pos" not in raw_object:
+                continue
+            position = _roster_position(raw_object.get("pos"))
+            if position is None:
+                raise ValueError("alliance roster contains an invalid object position")
+            positions[identifier] = position
+    return AllianceRosterSnapshot(
+        tick=tick,
+        usernames=frozenset(value for value in raw_names if value),
+        object_ids=frozenset(object_ids),
+        object_positions=tuple(sorted(positions.items(), key=lambda item: item[0].bytes)),
+    )
+
+
+class AllianceRosterClient:
+    def __init__(
+        self,
+        url: str,
+        token: str,
+        *,
+        refresh_seconds: float = 15.0,
+        timeout_seconds: float = 5.0,
+        opener: Callable[..., object] = urllib.request.urlopen,
+    ) -> None:
+        if not url.startswith(("http://", "https://")):
+            raise ValueError("alliance roster URL must use HTTP or HTTPS")
+        if not token or any(character.isspace() for character in token):
+            raise ValueError("alliance roster token must be non-empty and contain no whitespace")
+        if not math.isfinite(refresh_seconds) or refresh_seconds <= 0:
+            raise ValueError("alliance roster refresh seconds must be finite and positive")
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("alliance roster timeout seconds must be finite and positive")
+        self.url = url
+        self._token = token
+        self.refresh_seconds = refresh_seconds
+        self.timeout_seconds = timeout_seconds
+        self._opener = opener
+        self._snapshot: AllianceRosterSnapshot | None = None
+        self._last_attempt_at = -refresh_seconds
+        self.last_error: str | None = None
+
+    def snapshot(self, *, now: float | None = None) -> AllianceRosterSnapshot | None:
+        selected_now = time.monotonic() if now is None else now
+        if selected_now - self._last_attempt_at < self.refresh_seconds:
+            return self._snapshot
+        self._last_attempt_at = selected_now
+        request = urllib.request.Request(
+            self.url,
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        try:
+            response = self._opener(request, timeout=self.timeout_seconds)
+            with response:
+                payload = json.load(response)
+            self._snapshot = _parse_alliance_roster(payload)
+            self.last_error = None
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            self.last_error = type(exc).__name__
+            print(
+                "WARNING alliance_roster_refresh_failed "
+                f"error={self.last_error} cached={int(self._snapshot is not None)}",
+                file=sys.stderr,
+                flush=True,
+            )
+        return self._snapshot
 
 
 def _coordination_name(value: str, label: str) -> str:
@@ -591,6 +722,22 @@ def load_api_key(
     if not key:
         raise ValueError("API key cannot be empty")
     return key
+
+
+def _load_alliance_roster_token(path: Path) -> str:
+    try:
+        token = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ValueError("Alliance roster token file could not be read") from exc
+    if (
+        not token
+        or len(token) > 4096
+        or any(character.isspace() for character in token)
+    ):
+        raise ValueError(
+            "Alliance roster token must be non-empty and contain no whitespace"
+        )
+    return token
 
 
 def _distance(left: Position, right: Position) -> int:
@@ -1895,6 +2042,7 @@ class CoreFarmer:
         beacon_policy: str = DEFAULT_BEACON_POLICY,
         compatibility_marker: Path | None = DEFAULT_COMPATIBILITY_MARKER,
         alliance_coordinator: AllianceCoordinator | None = None,
+        alliance_roster_client: AllianceRosterClient | None = None,
     ) -> None:
         if not 1 <= worker_target <= MAX_WORKER_TARGET:
             raise ValueError(
@@ -1906,6 +2054,9 @@ class CoreFarmer:
         self.beacon_policy = beacon_policy
         self.compatibility_marker = compatibility_marker
         self.alliance_coordinator = alliance_coordinator
+        self.alliance_roster_client = alliance_roster_client
+        self.alliance_roster_ready = alliance_roster_client is None
+        self.alliance_roster_tick: int | None = None
         self.alliance_peers: tuple[AlliancePeer, ...] = ()
         self.allied_object_ids: set[UUID] = set()
         self.allied_usernames: set[str] = set()
@@ -1980,65 +2131,100 @@ class CoreFarmer:
 
     def _refresh_alliance(self, turn: Turn) -> None:
         coordinator = self.alliance_coordinator
-        if coordinator is None:
-            self.alliance_peers = ()
-            self.allied_object_ids.clear()
-            self.allied_usernames.clear()
-            self.allied_occupied_cells.clear()
-            self.alliance_leader = None
-            return
-        try:
-            coordinator.publish(turn)
-            deadline = time.monotonic() + coordinator.barrier_timeout_seconds
-            while True:
-                peers = coordinator.peers()
-                fresh_accounts = {
-                    peer.account_id
-                    for peer in peers
-                    if peer.tick >= turn.tick
-                }
-                if len(fresh_accounts) >= coordinator.expected_members:
-                    break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                time.sleep(min(0.05, remaining))
-        except OSError as exc:
-            print(
-                f"WARNING tick={turn.tick} alliance_coordination_error="
-                f"{type(exc).__name__}: {exc}",
-                file=sys.stderr,
-                flush=True,
-            )
-            peers = ()
+        peers: tuple[AlliancePeer, ...] = ()
+        if coordinator is not None:
+            try:
+                coordinator.publish(turn)
+                deadline = time.monotonic() + coordinator.barrier_timeout_seconds
+                while True:
+                    peers = coordinator.peers()
+                    fresh_accounts = {
+                        peer.account_id
+                        for peer in peers
+                        if peer.tick >= turn.tick
+                    }
+                    if len(fresh_accounts) >= coordinator.expected_members:
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(0.05, remaining))
+            except OSError as exc:
+                print(
+                    f"WARNING tick={turn.tick} alliance_coordination_error="
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                peers = ()
+        roster_snapshot = (
+            self.alliance_roster_client.snapshot()
+            if self.alliance_roster_client is not None
+            else None
+        )
+        self.alliance_roster_ready = (
+            self.alliance_roster_client is None or roster_snapshot is not None
+        )
+        self.alliance_roster_tick = (
+            roster_snapshot.tick if roster_snapshot is not None else None
+        )
         self.alliance_peers = peers
         self.alliance_turn_tick = turn.tick
-        self.allied_object_ids = {
+        local_object_ids = {
             identifier
             for peer in peers
-            if peer.account_id != coordinator.account_id
+            if coordinator is not None and peer.account_id != coordinator.account_id
             for identifier in (
                 *((peer.core_id,) if peer.core_id is not None else ()),
                 *peer.unit_ids,
             )
         }
-        self.allied_usernames = {
+        local_usernames = {
             peer.username
             for peer in peers
-            if peer.account_id != coordinator.account_id and peer.username
+            if coordinator is not None
+            and peer.account_id != coordinator.account_id
+            and peer.username
         }
+        controlled_ids = {
+            *((turn.core.id,) if turn.core is not None else ()),
+            *(unit.id for unit in turn.units),
+        }
+        external_object_ids = (
+            set(roster_snapshot.object_ids) - controlled_ids
+            if roster_snapshot is not None
+            else set()
+        )
+        self.allied_object_ids = local_object_ids | external_object_ids
+        own_username = turn.core.owner_username if turn.core is not None else ""
+        external_usernames = (
+            set(roster_snapshot.usernames) - ({own_username} if own_username else set())
+            if roster_snapshot is not None
+            else set()
+        )
+        self.allied_usernames = local_usernames | external_usernames
         self.revenge_usernames.difference_update(
             username.casefold() for username in self.allied_usernames
         )
-        self.allied_occupied_cells = {
+        local_occupied_cells = {
             position
             for peer in peers
-            if peer.account_id != coordinator.account_id
+            if coordinator is not None and peer.account_id != coordinator.account_id
             for position in (
                 *((peer.core_position,) if peer.core_position is not None else ()),
                 *peer.unit_positions,
             )
         }
+        external_occupied_cells = (
+            {
+                position
+                for identifier, position in roster_snapshot.object_positions
+                if identifier not in controlled_ids
+            }
+            if roster_snapshot is not None
+            else set()
+        )
+        self.allied_occupied_cells = local_occupied_cells | external_occupied_cells
         self.allied_occupied_cells.update(
             enemy.position
             for enemy in turn.visible_enemies
@@ -2052,30 +2238,56 @@ class CoreFarmer:
             identifier: sighting
             for identifier, sighting in self.enemy_core_sightings.items()
             if identifier not in self.allied_object_ids
+            and sighting.position not in self.allied_occupied_cells
         }
         self.enemy_unit_sightings = {
             identifier: sighting
             for identifier, sighting in self.enemy_unit_sightings.items()
             if identifier not in self.allied_object_ids
+            and sighting.position not in self.allied_occupied_cells
         }
         self.enemy_unit_motion = {
             identifier: motion
             for identifier, motion in self.enemy_unit_motion.items()
             if identifier not in self.allied_object_ids
+            and motion.position not in self.allied_occupied_cells
         }
         self.stationary_core_memory = {
             identifier: sighting
             for identifier, sighting in self.stationary_core_memory.items()
             if identifier not in self.allied_object_ids
+            and sighting.position not in self.allied_occupied_cells
         }
         self.active_enemy_ids.difference_update(self.allied_object_ids)
         self.preemptive_evade_enemy_ids.difference_update(self.allied_object_ids)
         self.pursuing_enemy_ids.difference_update(self.allied_object_ids)
-        for identifier in self.allied_object_ids:
-            self.recent_attack_threats.pop(identifier, None)
-        if self.isolated_core_target_id in self.allied_object_ids:
+        self.recent_attack_threats = {
+            identifier: threat
+            for identifier, threat in self.recent_attack_threats.items()
+            if identifier not in self.allied_object_ids
+            and threat.position not in self.allied_occupied_cells
+        }
+        isolated_sighting = self.stationary_core_memory.get(
+            self.isolated_core_target_id
+        )
+        if (
+            self.isolated_core_target_id in self.allied_object_ids
+            or (
+                isolated_sighting is not None
+                and isolated_sighting.position in self.allied_occupied_cells
+            )
+        ):
             self._release_core_raid(forget_position=True)
-        if self.stationary_unit_target_id in self.allied_object_ids:
+        stationary_sighting = self.enemy_unit_sightings.get(
+            self.stationary_unit_target_id
+        )
+        if (
+            self.stationary_unit_target_id in self.allied_object_ids
+            or (
+                stationary_sighting is not None
+                and stationary_sighting.position in self.allied_occupied_cells
+            )
+        ):
             self.stationary_unit_target_id = None
         viable = tuple(peer for peer in peers if peer.core_position is not None)
         self.alliance_leader = (
@@ -2085,10 +2297,13 @@ class CoreFarmer:
         )
 
     def _hostile_enemies(self, turn: Turn) -> tuple[object, ...]:
+        if not self.alliance_roster_ready:
+            return ()
         return tuple(
             enemy
             for enemy in turn.visible_enemies
             if enemy.id not in self.allied_object_ids
+            and enemy.position not in self.allied_occupied_cells
             and (
                 getattr(enemy, "kind", None) != "CORE"
                 or getattr(enemy, "owner_username", "") not in self.allied_usernames
@@ -5525,6 +5740,7 @@ class CoreFarmer:
                     and target.id == target_id
                     and ranger.id in strike_rangers
                     and moving_worker_position not in context.obstacles
+                    and moving_worker_position not in context.allied_cells
                     and _ranger_can_shoot(
                         ranger.position,
                         moving_worker_position,
@@ -5656,6 +5872,7 @@ class CoreFarmer:
                     if (
                         moving_worker_position is not None
                         and moving_worker_position not in context.obstacles
+                        and moving_worker_position not in context.allied_cells
                         and _ranger_can_shoot(
                             ranger.position,
                             moving_worker_position,
@@ -5865,8 +6082,18 @@ class CoreFarmer:
         cargo_workers = [worker for worker in turn.workers if worker.cargo > 0]
         if any(worker.position == core.position for worker in cargo_workers):
             return True
+        visible_cargo = sum(
+            position_visible_from(
+                core.position,
+                worker.position,
+                VISION_RADII["CORE"],
+                set(turn.obstacle_cells),
+            )
+            for worker in cargo_workers
+        )
         return (
             len(cargo_workers) >= CORE_MIGRATION_DELIVERY_BACKLOG
+            and visible_cargo >= CORE_MIGRATION_VISIBLE_CARGO
             and 0
             <= turn.tick - self.last_core_move_tick
             <= CORE_MIGRATION_DELIVERY_TICKS
@@ -6166,15 +6393,6 @@ class CoreFarmer:
 
         move_progress = core.view.move_progress or 0
         move_committed = move_progress >= CORE_MOVE_COMMIT_PROGRESS
-        cargo_on_core = any(
-            worker.cargo > 0 and worker.position == core.position
-            for worker in turn.workers
-        )
-        if cargo_on_core or (
-            not move_committed and self._should_wait_for_cargo(turn, context)
-        ):
-            self.last_core_cancel_reason = "CARGO_DELIVERY"
-            return True
 
         cancel_for_beacon = (
             not move_committed
@@ -6789,6 +7007,8 @@ def _position_diagnostics(turn: Turn, tactic: CoreFarmer) -> str:
         f"alliance_peers={len(tactic.alliance_peers)} "
         f"alliance_leader={tactic.alliance_leader.account_id if tactic.alliance_leader else 'none'} "
         f"allied_objects={len(tactic.allied_object_ids)} "
+        f"alliance_roster_ready={int(tactic.alliance_roster_ready)} "
+        f"alliance_roster_tick={tactic.alliance_roster_tick if tactic.alliance_roster_tick is not None else 'none'} "
         f"enemy_types={_format_counts(enemy_counts)} "
         f"global_posture={tactic.threat_assessment.global_posture.value} "
         f"threat_level={tactic.threat_assessment.level.value} "
@@ -6961,6 +7181,10 @@ def play(
     alliance_expected_members: int = 1,
     alliance_stale_seconds: float = DEFAULT_ALLIANCE_STALE_SECONDS,
     alliance_barrier_timeout_seconds: float = DEFAULT_ALLIANCE_BARRIER_TIMEOUT_SECONDS,
+    alliance_roster_url: str | None = None,
+    alliance_roster_token_file: Path | None = None,
+    alliance_roster_refresh_seconds: float = 15.0,
+    alliance_roster_timeout_seconds: float = 5.0,
 ) -> None:
     if (
         not math.isfinite(stale_turn_timeout_seconds)
@@ -6979,6 +7203,10 @@ def play(
         raise ValueError(
             "alliance_directory is required when alliance coordination is configured"
         )
+    if (alliance_roster_url is None) != (alliance_roster_token_file is None):
+        raise ValueError(
+            "alliance roster URL and token file must be configured together"
+        )
     alliance_coordinator = (
         AllianceCoordinator(
             alliance_directory,
@@ -6993,11 +7221,23 @@ def play(
         and alliance_account_id is not None
         else None
     )
+    alliance_roster_client = (
+        AllianceRosterClient(
+            alliance_roster_url,
+            _load_alliance_roster_token(alliance_roster_token_file),
+            refresh_seconds=alliance_roster_refresh_seconds,
+            timeout_seconds=alliance_roster_timeout_seconds,
+        )
+        if alliance_roster_url is not None
+        and alliance_roster_token_file is not None
+        else None
+    )
     tactic = CoreFarmer(
         worker_target=worker_target,
         beacon_policy=beacon_policy,
         compatibility_marker=compatibility_marker,
         alliance_coordinator=alliance_coordinator,
+        alliance_roster_client=alliance_roster_client,
     )
     last_accepted_tick: int | None = None
     resource_ledger_snapshot: ResourceLedgerSnapshot | None = None
@@ -7244,6 +7484,27 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_ALLIANCE_BARRIER_TIMEOUT_SECONDS,
         help="Wait this long for same-Turn member identity before choosing WAIT.",
     )
+    parser.add_argument(
+        "--alliance-roster-url",
+        help="Authenticated external alliance roster endpoint used before attacks.",
+    )
+    parser.add_argument(
+        "--alliance-roster-token-file",
+        type=Path,
+        help="File containing the external roster bearer token.",
+    )
+    parser.add_argument(
+        "--alliance-roster-refresh-seconds",
+        type=float,
+        default=15.0,
+        help="Cache the external alliance roster for this many seconds.",
+    )
+    parser.add_argument(
+        "--alliance-roster-timeout-seconds",
+        type=float,
+        default=5.0,
+        help="Timeout for each external alliance roster request.",
+    )
     return parser
 
 
@@ -7270,6 +7531,10 @@ def main(argv: list[str] | None = None) -> int:
             alliance_expected_members=args.alliance_expected_members,
             alliance_stale_seconds=args.alliance_stale_seconds,
             alliance_barrier_timeout_seconds=args.alliance_barrier_timeout_seconds,
+            alliance_roster_url=args.alliance_roster_url,
+            alliance_roster_token_file=args.alliance_roster_token_file,
+            alliance_roster_refresh_seconds=args.alliance_roster_refresh_seconds,
+            alliance_roster_timeout_seconds=args.alliance_roster_timeout_seconds,
         )
 
     except KeyboardInterrupt:

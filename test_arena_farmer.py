@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import io
+import json
 import tempfile
 import threading
 import unittest
@@ -24,6 +25,7 @@ from arena_hero import (
 
 from arena_farmer import (
     AllianceCoordinator,
+    AllianceRosterClient,
     CoreRaidTarget,
     CoreFarmer,
     GlobalPosture,
@@ -208,6 +210,143 @@ def plan(
 
 
 class AllianceCoordinatorTests(unittest.TestCase):
+    @staticmethod
+    def _roster_payload() -> dict[str, object]:
+        return {
+            "success": True,
+            "data": {
+                "tick": 100,
+                "gameUsernames": ["farmer", "ally"],
+                "allies": [
+                    {
+                        "gameUsername": "farmer",
+                        "online": True,
+                        "tick": 100,
+                        "idsOnly": False,
+                        "core": {"id": CORE_ID, "pos": [0, 0]},
+                        "objectIds": [CORE_ID, WORKER_1],
+                        "units": [
+                            {"id": WORKER_1, "pos": [5, 5], "type": "WORKER"}
+                        ],
+                    },
+                    {
+                        "gameUsername": "ally",
+                        "online": True,
+                        "tick": 100,
+                        "idsOnly": False,
+                        "core": {"id": ALLY_CORE_ID, "pos": [3, 0]},
+                        "objectIds": [ALLY_CORE_ID, ALLY_UNIT_ID, ENEMY_2],
+                        "units": [
+                            {"id": ALLY_UNIT_ID, "pos": [2, 0], "type": "RANGER"},
+                            {"id": ENEMY_2, "pos": [4, 0], "type": "WORKER"},
+                        ],
+                    },
+                    {
+                        "gameUsername": "private-ally",
+                        "online": True,
+                        "tick": 100,
+                        "idsOnly": True,
+                        "core": None,
+                        "objectIds": ["20000000-0000-4000-8000-000000000003"],
+                        "units": [
+                            {"id": "20000000-0000-4000-8000-000000000003"}
+                        ],
+                    },
+                ],
+            },
+        }
+
+    def test_external_roster_merges_identity_and_occupied_cells(self) -> None:
+        payload = self._roster_payload()
+
+        def opener(request: object, *, timeout: float) -> io.StringIO:
+            self.assertEqual(timeout, 5)
+            self.assertTrue(str(request.get_header("Authorization")).startswith("Bearer "))
+            return io.StringIO(json.dumps(payload))
+
+        tactic = CoreFarmer(
+            worker_target=1,
+            beacon_policy="hold",
+            alliance_roster_client=AllianceRosterClient(
+                "http://alliance.test/api/alliance/roster",
+                "test-token",
+                opener=opener,
+            ),
+        )
+        turn = make_turn(
+            tick=100,
+            units=[unit(WORKER_1, "WORKER", (5, 5), cargo=0)],
+            enemies=[
+                {**enemy_core(ALLY_CORE_ID, (3, 0)), "owner_username": "ally"},
+                unit(ALLY_UNIT_ID, "RANGER", (2, 0), controlled=False),
+                unit(ENEMY_1, "RANGER", (4, 0), controlled=False),
+            ],
+        )
+
+        tactic._refresh_alliance(turn)
+
+        self.assertTrue(tactic.alliance_roster_ready)
+        self.assertEqual(tactic.alliance_roster_tick, 100)
+        self.assertNotIn(UUID(CORE_ID), tactic.allied_object_ids)
+        self.assertNotIn(UUID(WORKER_1), tactic.allied_object_ids)
+        self.assertIn(UUID(ALLY_CORE_ID), tactic.allied_object_ids)
+        self.assertIn(UUID(ALLY_UNIT_ID), tactic.allied_object_ids)
+        self.assertIn("ally", tactic.allied_usernames)
+        self.assertNotIn("farmer", tactic.allied_usernames)
+        self.assertIn((4, 0), tactic.allied_occupied_cells)
+        self.assertEqual(tactic._hostile_enemies(turn), ())
+
+    def test_external_roster_failure_reuses_last_successful_cache(self) -> None:
+        attempts = 0
+
+        def opener(_request: object, *, timeout: float) -> io.StringIO:
+            nonlocal attempts
+            attempts += 1
+            if attempts > 1:
+                raise OSError("offline")
+            return io.StringIO(json.dumps(self._roster_payload()))
+
+        client = AllianceRosterClient(
+            "http://alliance.test/api/alliance/roster",
+            "test-token",
+            opener=opener,
+        )
+        first = client.snapshot(now=0)
+        with redirect_stderr(io.StringIO()):
+            cached = client.snapshot(now=16)
+
+        self.assertIs(first, cached)
+        self.assertEqual(client.last_error, "OSError")
+        self.assertEqual(attempts, 2)
+
+    def test_external_roster_initial_failure_suppresses_attacks(self) -> None:
+        def opener(_request: object, *, timeout: float) -> object:
+            raise OSError("offline")
+
+        tactic = CoreFarmer(
+            worker_target=1,
+            beacon_policy="hold",
+            alliance_roster_client=AllianceRosterClient(
+                "http://alliance.test/api/alliance/roster",
+                "test-token",
+                opener=opener,
+            ),
+        )
+        turn = make_turn(
+            tick=100,
+            units=[unit(RANGER_1, "RANGER", (0, 1))],
+            enemies=[unit(ENEMY_1, "RANGER", (2, 1), controlled=False)],
+        )
+
+        with redirect_stderr(io.StringIO()):
+            tactic.choose_actions(turn)
+
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+        self.assertFalse(tactic.alliance_roster_ready)
+        self.assertEqual(tactic._hostile_enemies(turn), ())
+        self.assertNotIn("SHOOT", str(queued))
+        self.assertNotIn("SWEEP", str(queued))
+
     def test_population_leader_is_selected_and_follower_core_moves_toward_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             shared = Path(directory)
@@ -827,7 +966,12 @@ class CoreFarmerTests(unittest.TestCase):
 
     def test_dashboard_core_order_pauses_for_bounded_delivery_window(self) -> None:
         cargo_workers = [
-            unit(identifier, "WORKER", (-10 - index, index), cargo=1)
+            unit(
+                identifier,
+                "WORKER",
+                ((index + 1, 0) if index < 5 else (100, 100)),
+                cargo=1,
+            )
             for index, identifier in enumerate(
                 (WORKER_1, WORKER_2, WORKER_3, WORKER_4, WORKER_5, WORKER_6)
             )
@@ -859,14 +1003,45 @@ class CoreFarmerTests(unittest.TestCase):
             {"type": "START_MOVE", "direction": "RIGHT"},
         )
 
+    def test_dashboard_core_order_ignores_distant_cargo_backlog(self) -> None:
+        cargo_workers = [
+            unit(identifier, "WORKER", (100 + index, 100), cargo=1)
+            for index, identifier in enumerate(
+                (WORKER_1, WORKER_2, WORKER_3, WORKER_4, WORKER_5, WORKER_6)
+            )
+        ]
+        tactic = CoreFarmer(worker_target=6, beacon_policy="hold")
+        tactic.last_core_move_tick = 100
+        turn = make_turn(tick=103, units=cargo_workers)
+        tactic.choose_actions(turn)
+        tactic.apply_unit_orders(
+            turn,
+            [
+                {
+                    "id": 15,
+                    "unit_type": "CORE",
+                    "unit_count": 1,
+                    "unit_ids": [CORE_ID],
+                    "target_x": 20,
+                    "target_y": 0,
+                }
+            ],
+        )
+
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+        self.assertEqual(
+            queued["core_action"],
+            {"type": "START_MOVE", "direction": "RIGHT"},
+        )
+
     def test_migration_delivery_window_does_not_reserve_core_for_spawn(self) -> None:
         cargo_workers = [
             unit(WORKER_1, "WORKER", (1, 0), cargo=1),
-            unit(WORKER_2, "WORKER", (4, 0), cargo=1),
-            unit(WORKER_3, "WORKER", (5, 0), cargo=1),
-            unit(WORKER_4, "WORKER", (6, 0), cargo=1),
-            unit(WORKER_5, "WORKER", (7, 0), cargo=1),
-            unit(WORKER_6, "WORKER", (8, 0), cargo=1),
+            unit(WORKER_2, "WORKER", (2, 0), cargo=1),
+            unit(WORKER_3, "WORKER", (3, 0), cargo=1),
+            unit(WORKER_4, "WORKER", (4, 0), cargo=1),
+            unit(WORKER_5, "WORKER", (5, 0), cargo=1),
+            unit(WORKER_6, "WORKER", (100, 100), cargo=1),
         ]
         tactic = CoreFarmer(worker_target=18, beacon_policy="hold")
         tactic.manual_core_order_active = True
@@ -923,7 +1098,12 @@ class CoreFarmerTests(unittest.TestCase):
                 )
             )
             cargo_workers = [
-                unit(identifier, "WORKER", (-10 - index, index), cargo=1)
+                unit(
+                    identifier,
+                    "WORKER",
+                    ((index + 1, 0) if index < 5 else (100, 100)),
+                    cargo=1,
+                )
                 for index, identifier in enumerate(
                     (WORKER_1, WORKER_2, WORKER_3, WORKER_4, WORKER_5, WORKER_6)
                 )
@@ -1711,7 +1891,7 @@ class CoreFarmerTests(unittest.TestCase):
             {"type": "MOVE", "direction": "LEFT"},
         )
 
-    def test_cargo_worker_cancels_moving_core_for_delivery(self) -> None:
+    def test_cargo_worker_waits_while_moving_core_finishes(self) -> None:
         queued = plan(
             make_turn(
                 core_state="MOVING",
@@ -1720,7 +1900,7 @@ class CoreFarmerTests(unittest.TestCase):
             )
         )
         self.assertEqual(queued["unit_actions"][WORKER_1]["type"], "WAIT")
-        self.assertEqual(queued["core_action"]["type"], "CANCEL_MOVE")
+        self.assertNotIn("core_action", queued)
 
     def test_defender_vacates_core_for_cargo_despite_visible_far_worker(self) -> None:
         queued = plan(
@@ -2271,7 +2451,7 @@ class CoreFarmerTests(unittest.TestCase):
         )
         self.assertNotIn("core_action", queued)
 
-    def test_committed_retreat_still_cancels_cargo_on_core(self) -> None:
+    def test_committed_retreat_finishes_with_cargo_on_core(self) -> None:
         queued = plan(
             make_turn(
                 core_state="MOVING",
@@ -2282,7 +2462,33 @@ class CoreFarmerTests(unittest.TestCase):
                 units=[unit(WORKER_1, "WORKER", (0, 0), cargo=1)],
             )
         )
-        self.assertEqual(queued["core_action"]["type"], "CANCEL_MOVE")
+        self.assertNotIn("core_action", queued)
+
+    def test_newly_started_retreat_finishes_with_cargo_on_core(self) -> None:
+        queued = plan(
+            make_turn(
+                core_state="MOVING",
+                move_direction="LEFT",
+                move_progress=1,
+                move_destination=(-1, 0),
+                beacon_position=(5, 0),
+                units=[unit(WORKER_1, "WORKER", (0, 0), cargo=1)],
+            )
+        )
+        self.assertNotIn("core_action", queued)
+
+    def test_newly_started_retreat_finishes_with_nearby_cargo(self) -> None:
+        queued = plan(
+            make_turn(
+                core_state="MOVING",
+                move_direction="LEFT",
+                move_progress=1,
+                move_destination=(-1, 0),
+                beacon_position=(5, 0),
+                units=[unit(WORKER_1, "WORKER", (1, 0), cargo=1)],
+            )
+        )
+        self.assertNotIn("core_action", queued)
 
     def test_improving_evade_keeps_moving_despite_cargo_on_core(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="retreat")

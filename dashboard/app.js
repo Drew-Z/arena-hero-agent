@@ -26,6 +26,9 @@ const ui = {
   unitList: document.querySelector("#order-unit-list"),
   orderForm: document.querySelector("#order-form"),
   orderStatus: document.querySelector("#order-status"),
+  orderSelectionMode: document.querySelector("#order-selection-mode"),
+  orderDistanceField: document.querySelector("#order-distance-field"),
+  orderMinDistance: document.querySelector("#order-min-distance"),
   pickTarget: document.querySelector("#pick-order-target"),
   orderX: document.querySelector("#order-x"),
   orderY: document.querySelector("#order-y"),
@@ -763,6 +766,14 @@ function renderExpeditions() {
 
 function renderUnitPicker() {
   const selectedType = document.querySelector("#order-unit-type").value;
+  if (selectedType === "CORE" && ui.orderSelectionMode.value === "DISTANT") {
+    ui.orderSelectionMode.value = "MANUAL";
+  }
+  const selectionMode = ui.orderSelectionMode.value;
+  const distantOption = ui.orderSelectionMode.querySelector('option[value="DISTANT"]');
+  distantOption.disabled = selectedType === "CORE";
+  const core = state.controlUnits.find((unit) => unit.kind === "CORE");
+  const minDistance = Math.max(0, Number(ui.orderMinDistance.value) || 0);
   const selectedIds = new Set(
     [...ui.unitList.querySelectorAll("input:checked")].map((input) => input.value),
   );
@@ -774,6 +785,7 @@ function renderUnitPicker() {
     ))
     .sort((left, right) => left.id.localeCompare(right.id));
   ui.unitList.replaceChildren();
+  ui.orderDistanceField.classList.toggle("hidden", selectionMode !== "DISTANT");
   if (!units.length) {
     const empty = document.createElement("span");
     empty.className = "empty-state";
@@ -785,10 +797,16 @@ function renderUnitPicker() {
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.value = unit.id;
-      checkbox.checked = selectedIds.has(unit.id);
+      const coreDistance = core
+        ? Math.abs(unit.position[0] - core.position[0]) + Math.abs(unit.position[1] - core.position[1])
+        : null;
+      checkbox.checked = selectionMode === "ALL"
+        || (selectionMode === "DISTANT" && coreDistance !== null && coreDistance >= minDistance)
+        || (selectionMode === "MANUAL" && selectedIds.has(unit.id));
       const cargo = unit.unit_type === "WORKER" ? ` / 载货 ${unit.cargo}` : "";
+      const distance = unit.kind === "UNIT" && coreDistance !== null ? ` / 距 Core ${coreDistance}` : "";
       const text = document.createElement("span");
-      text.textContent = `${unit.id.slice(0, 8)} / (${unit.position[0]},${unit.position[1]}) / HP ${unit.hp}${cargo}`;
+      text.textContent = `${unit.id.slice(0, 8)} / (${unit.position[0]},${unit.position[1]}) / HP ${unit.hp}${cargo}${distance}`;
       label.append(checkbox, text);
       ui.unitList.append(label);
     });
@@ -1074,7 +1092,13 @@ ui.orderForm.addEventListener("submit", async (event) => {
 });
 
 document.querySelector("#order-unit-type").addEventListener("change", renderUnitPicker);
+ui.orderSelectionMode.addEventListener("change", renderUnitPicker);
+ui.orderMinDistance.addEventListener("input", () => {
+  if (ui.orderSelectionMode.value === "DISTANT") renderUnitPicker();
+});
 ui.unitList.addEventListener("change", () => {
+  ui.orderSelectionMode.value = "MANUAL";
+  ui.orderDistanceField.classList.add("hidden");
   document.querySelector("#order-count").value = ui.unitList.querySelectorAll("input:checked").length;
 });
 ui.orders.addEventListener("click", async (event) => {
