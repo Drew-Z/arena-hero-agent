@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import io
+import json
 import tempfile
 import threading
 import unittest
@@ -24,6 +25,7 @@ from arena_hero import (
 
 from arena_farmer import (
     AllianceCoordinator,
+    AllianceRosterClient,
     CoreRaidTarget,
     CoreFarmer,
     GlobalPosture,
@@ -208,6 +210,143 @@ def plan(
 
 
 class AllianceCoordinatorTests(unittest.TestCase):
+    @staticmethod
+    def _roster_payload() -> dict[str, object]:
+        return {
+            "success": True,
+            "data": {
+                "tick": 100,
+                "gameUsernames": ["farmer", "ally"],
+                "allies": [
+                    {
+                        "gameUsername": "farmer",
+                        "online": True,
+                        "tick": 100,
+                        "idsOnly": False,
+                        "core": {"id": CORE_ID, "pos": [0, 0]},
+                        "objectIds": [CORE_ID, WORKER_1],
+                        "units": [
+                            {"id": WORKER_1, "pos": [5, 5], "type": "WORKER"}
+                        ],
+                    },
+                    {
+                        "gameUsername": "ally",
+                        "online": True,
+                        "tick": 100,
+                        "idsOnly": False,
+                        "core": {"id": ALLY_CORE_ID, "pos": [3, 0]},
+                        "objectIds": [ALLY_CORE_ID, ALLY_UNIT_ID, ENEMY_2],
+                        "units": [
+                            {"id": ALLY_UNIT_ID, "pos": [2, 0], "type": "RANGER"},
+                            {"id": ENEMY_2, "pos": [4, 0], "type": "WORKER"},
+                        ],
+                    },
+                    {
+                        "gameUsername": "private-ally",
+                        "online": True,
+                        "tick": 100,
+                        "idsOnly": True,
+                        "core": None,
+                        "objectIds": ["20000000-0000-4000-8000-000000000003"],
+                        "units": [
+                            {"id": "20000000-0000-4000-8000-000000000003"}
+                        ],
+                    },
+                ],
+            },
+        }
+
+    def test_external_roster_merges_identity_and_occupied_cells(self) -> None:
+        payload = self._roster_payload()
+
+        def opener(request: object, *, timeout: float) -> io.StringIO:
+            self.assertEqual(timeout, 5)
+            self.assertTrue(str(request.get_header("Authorization")).startswith("Bearer "))
+            return io.StringIO(json.dumps(payload))
+
+        tactic = CoreFarmer(
+            worker_target=1,
+            beacon_policy="hold",
+            alliance_roster_client=AllianceRosterClient(
+                "http://alliance.test/api/alliance/roster",
+                "test-token",
+                opener=opener,
+            ),
+        )
+        turn = make_turn(
+            tick=100,
+            units=[unit(WORKER_1, "WORKER", (5, 5), cargo=0)],
+            enemies=[
+                {**enemy_core(ALLY_CORE_ID, (3, 0)), "owner_username": "ally"},
+                unit(ALLY_UNIT_ID, "RANGER", (2, 0), controlled=False),
+                unit(ENEMY_1, "RANGER", (4, 0), controlled=False),
+            ],
+        )
+
+        tactic._refresh_alliance(turn)
+
+        self.assertTrue(tactic.alliance_roster_ready)
+        self.assertEqual(tactic.alliance_roster_tick, 100)
+        self.assertNotIn(UUID(CORE_ID), tactic.allied_object_ids)
+        self.assertNotIn(UUID(WORKER_1), tactic.allied_object_ids)
+        self.assertIn(UUID(ALLY_CORE_ID), tactic.allied_object_ids)
+        self.assertIn(UUID(ALLY_UNIT_ID), tactic.allied_object_ids)
+        self.assertIn("ally", tactic.allied_usernames)
+        self.assertNotIn("farmer", tactic.allied_usernames)
+        self.assertIn((4, 0), tactic.allied_occupied_cells)
+        self.assertEqual(tactic._hostile_enemies(turn), ())
+
+    def test_external_roster_failure_reuses_last_successful_cache(self) -> None:
+        attempts = 0
+
+        def opener(_request: object, *, timeout: float) -> io.StringIO:
+            nonlocal attempts
+            attempts += 1
+            if attempts > 1:
+                raise OSError("offline")
+            return io.StringIO(json.dumps(self._roster_payload()))
+
+        client = AllianceRosterClient(
+            "http://alliance.test/api/alliance/roster",
+            "test-token",
+            opener=opener,
+        )
+        first = client.snapshot(now=0)
+        with redirect_stderr(io.StringIO()):
+            cached = client.snapshot(now=16)
+
+        self.assertIs(first, cached)
+        self.assertEqual(client.last_error, "OSError")
+        self.assertEqual(attempts, 2)
+
+    def test_external_roster_initial_failure_suppresses_attacks(self) -> None:
+        def opener(_request: object, *, timeout: float) -> object:
+            raise OSError("offline")
+
+        tactic = CoreFarmer(
+            worker_target=1,
+            beacon_policy="hold",
+            alliance_roster_client=AllianceRosterClient(
+                "http://alliance.test/api/alliance/roster",
+                "test-token",
+                opener=opener,
+            ),
+        )
+        turn = make_turn(
+            tick=100,
+            units=[unit(RANGER_1, "RANGER", (0, 1))],
+            enemies=[unit(ENEMY_1, "RANGER", (2, 1), controlled=False)],
+        )
+
+        with redirect_stderr(io.StringIO()):
+            tactic.choose_actions(turn)
+
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+        self.assertFalse(tactic.alliance_roster_ready)
+        self.assertEqual(tactic._hostile_enemies(turn), ())
+        self.assertNotIn("SHOOT", str(queued))
+        self.assertNotIn("SWEEP", str(queued))
+
     def test_population_leader_is_selected_and_follower_core_moves_toward_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             shared = Path(directory)

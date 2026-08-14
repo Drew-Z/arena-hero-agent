@@ -26,6 +26,10 @@ The Agent reads credentials in this order:
 | `--alliance-expected-members` | `1` | Pause autonomous actions until this many same-Turn members are present. |
 | `--alliance-stale-seconds` | `60` | Reject member state older than this many seconds. |
 | `--alliance-barrier-timeout-seconds` | `1` | Maximum same-Turn identity synchronization wait before choosing WAIT. |
+| `--alliance-roster-url` | none | Authenticated external roster endpoint checked before selecting attack targets. |
+| `--alliance-roster-token-file` | none | Protected file containing the external roster bearer token. Required with the roster URL. |
+| `--alliance-roster-refresh-seconds` | `15` | Minimum interval between roster requests; the last successful roster remains cached. |
+| `--alliance-roster-timeout-seconds` | `5` | Timeout for one roster request. |
 
 The default unattended force is `18 Workers + 14 Vanguards + 16 Rangers = 48`.
 Core capacity therefore reaches 240 resources. Production is staged at
@@ -55,6 +59,15 @@ For fail-safe operation, set `--alliance-expected-members` to the configured
 account count. An Agent chooses WAIT until every member has published identity
 for the same Turn. Stale or malformed state is ignored, preventing an unknown
 object from being trusted after an account disconnects.
+
+An optional authenticated external roster can extend ally protection beyond
+the local coordination group. Core ownership is matched by game username,
+Units are matched by object UUID, and known allied positions block attacks on
+the same cell. The bearer token must be supplied through a protected file (a
+Docker secret in Compose), never a command-line value or image layer. The
+roster is refreshed every 15 seconds by default. A failed refresh keeps the
+last successful snapshot; if the initial request fails, offensive target
+selection stays disabled until a roster has been verified.
 
 ## Dashboard
 
