@@ -30,6 +30,7 @@ const ui = {
   orderX: document.querySelector("#order-x"),
   orderY: document.querySelector("#order-y"),
   cursorPosition: document.querySelector("#cursor-position"),
+  hoverTooltip: document.querySelector("#hover-tooltip"),
   productionForm: document.querySelector("#production-form"),
   productionStatus: document.querySelector("#production-status"),
   allianceForm: document.querySelector("#alliance-form"),
@@ -79,10 +80,153 @@ const state = {
   pickMode: null,
   viewport: { width: 1, height: 1 },
   mapIndex: Object.fromEntries(MAP_LAYERS.map((name) => [name, new Map()])),
+  unitFilter: "ALL",
+  useRelativeCoords: false,
 };
+// 获取己方 Core 的绝对坐标
+function getCorePosition() {
+  const core = controlledCore();
+  return core?.position || null;
+}
+
+// 绝对坐标 -> 相对坐标
+function toRelativePos(worldPos) {
+  const corePos = getCorePosition();
+  if (!corePos) return worldPos;
+  return [worldPos[0] - corePos[0], worldPos[1] - corePos[1]];
+}
+
+// 相对坐标 -> 绝对坐标 (发送给后台用)
+function toAbsolutePos(relPos) {
+  const corePos = getCorePosition();
+  if (!corePos) return relPos;
+  return [corePos[0] + relPos[0], corePos[1] + relPos[1]];
+}
+
+// 格式化坐标文本显示
+function formatCoordDisplay(worldPos) {
+  const [wx, wy] = worldPos;
+  const rel = toRelativePos(worldPos);
+  
+  if (state.useRelativeCoords && rel) {
+    const rx = rel[0] >= 0 ? `+${rel[0]}` : rel[0];
+    const ry = rel[1] >= 0 ? `+${rel[1]}` : rel[1];
+    return `Δ x ${rx} · y ${ry} (绝对: ${wx}, ${wy})`;
+  }
+  return `x ${wx} · y ${wy}`;
+}
 
 let drawFrame = 0;
+//悬停计时相关变量
+let hoverTimer = null;
+let currentHoverCell = null;
+const HOVER_DELAY = 1000; // 悬停触发延迟（单位：毫秒，可根据需求调整）
 
+function clearHover() {
+  if (hoverTimer) {
+    clearTimeout(hoverTimer);
+    hoverTimer = null;
+  }
+  currentHoverCell = null;
+  if (ui.hoverTooltip) {
+    ui.hoverTooltip.classList.add("hidden");
+  }
+}
+
+function showHoverTooltip(x, y) {
+  if (!ui.hoverTooltip) return;
+  // 计算方格在 Canvas 上的屏幕坐标
+  const [sx, sy] = screenPosition([x, y]);
+  
+  // 🌟 支持悬停提示框显示相对坐标
+  const rel = toRelativePos([x, y]);
+  if (state.useRelativeCoords && rel) {
+    const rx = rel[0] >= 0 ? `+${rel[0]}` : rel[0];
+    const ry = rel[1] >= 0 ? `+${rel[1]}` : rel[1];
+    ui.hoverTooltip.textContent = `相对 Core: (${rx}, ${ry})`;
+  } else {
+    ui.hoverTooltip.textContent = `坐标: (${x}, ${y})`;
+  }
+  ui.hoverTooltip.style.left = `${sx}px`;
+  ui.hoverTooltip.style.top = `${sy}px`;
+  ui.hoverTooltip.classList.remove("hidden");
+}
+
+function shouldDrawObject(item) {
+  // 核心 CORE 永远显示
+  if (item.kind === "CORE") return true;
+  // 全部显示模式
+  if (state.unitFilter === "ALL") return true;
+  // 按指定兵种过滤
+  return item.kind === "UNIT" && item.unit_type === state.unitFilter;
+}
+function selectUnitInForm(unit, isMultiSelect = false) {
+  const typeSelect = document.querySelector("#order-unit-type");
+  const unitType = unit.kind === "CORE" ? "CORE" : unit.unit_type;
+
+  // 如果点击了不同兵种，自动切换列表
+  if (typeSelect.value !== unitType) {
+    typeSelect.value = unitType;
+    renderUnitPicker();
+  }
+
+  const checkbox = ui.unitList.querySelector(`input[value="${unit.id}"]`);
+
+  if (isMultiSelect) {
+    // 多选模式：累加当前单位的勾选状态
+    if (checkbox) {
+      checkbox.checked = !checkbox.checked;
+    }
+  } else {
+    // 单选模式：取消其他勾选，只保留当前这 1 个单位
+    ui.unitList.querySelectorAll("input:checked").forEach((cb) => {
+      if (cb !== checkbox) cb.checked = false;
+    });
+    if (checkbox) checkbox.checked = true;
+  }
+
+  // 统计已选中的单位总数
+  const checkedBoxes = ui.unitList.querySelectorAll("input:checked");
+  document.querySelector("#order-count").value = checkedBoxes.length;
+
+  setPanel("control");
+  setTargetPicking(true, "order");
+  
+  const orderForm = document.querySelector("#order-form");
+  if (orderForm) {
+    orderForm.classList.remove("section-collapsed");
+  }
+
+  if (checkedBoxes.length > 0) {
+    ui.orderStatus.textContent = `已选中 ${checkedBoxes.length} 个 ${unitType}（按住 Ctrl 可继续多选），请点击地图标记目的地`;
+  } else {
+    ui.orderStatus.textContent = "未选中任何单位，请点击选择单位";
+  }
+}
+function drawSelectedUnitsHighlight() {
+  if (!state.pickingTarget) return;
+  const checkedIds = new Set(
+    [...ui.unitList.querySelectorAll("input:checked")].map((input) => input.value)
+  );
+  if (!checkedIds.size) return;
+
+  const objects = state.overview?.state?.objects || [];
+  context.save();
+  context.strokeStyle = colors.beacon; // 黄金色高亮
+  context.lineWidth = 2;
+  context.setLineDash([4, 4]);
+
+  for (const item of objects) {
+    if (checkedIds.has(item.id) && item.position) {
+      const [x, y] = screenPosition(item.position);
+      const radius = Math.max(8, state.view.scale * 0.6);
+      context.beginPath();
+      context.arc(x, y, radius, 0, Math.PI * 2);
+      context.stroke();
+    }
+  }
+  context.restore();
+}
 function resizeCanvas() {
   const ratio = Math.max(1, window.devicePixelRatio || 1);
   const rect = canvas.getBoundingClientRect();
@@ -231,7 +375,12 @@ function drawUnit(item, relation) {
     context.lineTo(x - radius * 1.45, y);
     context.closePath();
   } else if (item.unit_type === "RANGER") {
-    context.rect(x - radius, y - radius, radius * 2, radius * 2);
+    // 游侠 RANGER：向上箭头三角形（远程/弓箭）
+    const r = radius * 1.35;
+    context.moveTo(x, y - r * 0.95);          // 顶尖箭头
+    context.lineTo(x + r * 0.82, y + r * 0.7); // 右下角
+    context.lineTo(x - r * 0.82, y + r * 0.7); // 左下角
+    context.closePath();
   } else {
     context.arc(x, y, radius, 0, Math.PI * 2);
   }
@@ -341,10 +490,12 @@ function draw() {
   }
   for (const item of objects) {
     if (allianceIds.has(item.id) || item.relation === "ALLY") continue;
+    if (!shouldDrawObject(item)) continue; //过滤掉非当前兵种的单位
     if (item.kind === "CORE") drawCore(item, item.controlled ? "friendly" : "enemy");
     if (item.kind === "UNIT") drawUnit(item, item.controlled ? "friendly" : "enemy");
   }
   for (const item of allianceObjects) {
+    if (!shouldDrawObject(item)) continue; //过滤盟友非当前兵种单位
     if (item.kind === "CORE") drawCore(item, "ally");
     if (item.kind === "UNIT") drawUnit(item, "ally");
   }
@@ -365,6 +516,7 @@ function draw() {
     context.fill();
   }
   drawOrderTarget();
+  drawSelectedUnitsHighlight();
 }
 
 function setTargetPicking(active, mode = "order") {
@@ -771,12 +923,16 @@ function setPanel(name) {
 }
 
 canvas.addEventListener("pointerdown", (event) => {
+  clearHover(); 
   state.dragging = true;
   state.pointer = [event.clientX, event.clientY];
   state.pointerStart = [event.clientX, event.clientY];
   canvas.classList.add("dragging");
   canvas.setPointerCapture(event.pointerId);
 });
+canvas.addEventListener("pointerleave", () => {
+  clearHover();
+})
 canvas.addEventListener("pointermove", (event) => {
   if (!state.dragging) return;
   state.view.x -= (event.clientX - state.pointer[0]) / state.view.scale;
@@ -791,27 +947,68 @@ canvas.addEventListener("pointerup", (event) => {
   state.pointerStart = null;
   canvas.classList.remove("dragging");
   canvas.releasePointerCapture(event.pointerId);
-  if (state.pickingTarget && !moved) {
-    state.orderTarget = worldPosition(event.clientX, event.clientY);
-    if (state.pickMode === "expedition") {
-      document.querySelector("#expedition-x").value = state.orderTarget[0];
-      document.querySelector("#expedition-y").value = state.orderTarget[1];
-      ui.expeditionStatus.textContent = `目标已选择：${state.orderTarget[0]}, ${state.orderTarget[1]}`;
-    } else {
-      [ui.orderX.value, ui.orderY.value] = state.orderTarget;
-      ui.orderStatus.textContent = `目标已选择：${state.orderTarget[0]}, ${state.orderTarget[1]}`;
+   if (!moved) {
+    const worldPos = worldPosition(event.clientX, event.clientY);
+    // 判断是否按下了 Ctrl (Windows/Linux) 或 Cmd (Mac) 键
+    const isCtrlPressed = event.ctrlKey || event.metaKey;
+
+    // 检查点击位置是否有己方单位/核心
+    const objects = state.overview?.state?.objects || [];
+    const clickedUnit = objects.find((item) =>
+      item.controlled &&
+      shouldDrawObject(item) &&
+      ["UNIT", "CORE"].includes(item.kind) &&
+      Math.hypot(item.position[0] - worldPos[0], item.position[1] - worldPos[1]) <= 1.2
+    );
+
+    // 1. 优先处理点击单位：进入单选或 Ctrl 多选模式
+    if (clickedUnit) {
+      selectUnitInForm(clickedUnit, isCtrlPressed);
+      draw();
+      return;
     }
-    setTargetPicking(false);
-    draw();
+
+    // 2. 如果点击了空白地图：设置目的地并提交派遣（集体发送所有选中单位）
+    if (state.pickingTarget) {
+      state.orderTarget = worldPos;
+      //根据当前模式填入相对或绝对坐标
+      const displayPos = state.useRelativeCoords ? toRelativePos(worldPos) : worldPos;
+
+      if (state.pickMode === "expedition") {
+        document.querySelector("#expedition-x").value = displayPos[0];
+        document.querySelector("#expedition-y").value = displayPos[1];
+        ui.expeditionStatus.textContent = `目标已选择：${displayPos[0]}, ${displayPos[1]}`;
+        setTargetPicking(false);
+      } else {
+        [ui.orderX.value, ui.orderY.value] = displayPos;
+        setTargetPicking(false);
+
+        // 提交表单（自动打包所有勾选的单位 ID）
+        ui.orderForm.requestSubmit();
+      }
+      draw();
+      return;
+    }
   }
 });
 canvas.addEventListener("wheel", (event) => {
+  clearHover(); 
   event.preventDefault();
   state.view.scale = Math.max(1.5, Math.min(32, state.view.scale * (event.deltaY < 0 ? 1.14 : 0.88)));
   updateMetrics();
   scheduleDraw();
 }, { passive: false });
 
+// 兵种筛选按钮切换监听
+document.querySelectorAll("[data-unit-filter]").forEach((button) => {
+  button.addEventListener("click", () => {
+    state.unitFilter = button.dataset.unitFilter;
+    document.querySelectorAll("[data-unit-filter]").forEach((btn) => {
+      btn.classList.toggle("active", btn === button);
+    });
+    draw();
+  });
+});
 document.querySelector("#previous-tick").addEventListener("click", () => selectIndex(state.selectedIndex - 1));
 document.querySelector("#next-tick").addEventListener("click", () => selectIndex(state.selectedIndex + 1));
 document.querySelector("#toggle-play").addEventListener("click", togglePlay);
@@ -850,12 +1047,15 @@ ui.orderForm.addEventListener("submit", async (event) => {
     ui.orderStatus.textContent = "请先选择具体核心或至少一个具体单位";
     return;
   }
+  // 将输入框坐标换算回发送给后端的绝对坐标
+  const inputPos = [Number(ui.orderX.value), Number(ui.orderY.value)];
+  const absPos = state.useRelativeCoords ? toAbsolutePos(inputPos) : inputPos;
   const payload = {
     unit_type: document.querySelector("#order-unit-type").value,
     unit_count: unitIds.length,
     unit_ids: unitIds,
-    target_x: Number(ui.orderX.value),
-    target_y: Number(ui.orderY.value),
+    target_x: absPos[0], // 发给后端的永远是真实的绝对坐标
+    target_y: absPos[1],
   };
   try {
     const response = await fetch("/api/orders", {
@@ -897,7 +1097,20 @@ ui.orders.addEventListener("click", async (event) => {
 
 canvas.addEventListener("pointermove", (event) => {
   const [x, y] = worldPosition(event.clientX, event.clientY);
-  ui.cursorPosition.textContent = `x ${x} · y ${y}`;
+  ui.cursorPosition.textContent = formatCoordDisplay([x, y]); 
+  if (state.dragging) {
+    clearHover();
+    return;
+  }
+
+  if (!currentHoverCell || currentHoverCell[0] !== x || currentHoverCell[1] !== y) {
+    clearHover(); 
+    currentHoverCell = [x, y];
+    
+    hoverTimer = setTimeout(() => {
+      showHoverTooltip(x, y);
+    }, HOVER_DELAY);
+  }
 });
 
 ui.productionForm.addEventListener("submit", async (event) => {
@@ -941,13 +1154,19 @@ ui.allianceForm.addEventListener("submit", async (event) => {
 ui.expeditionForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const rawId = document.querySelector("#expedition-id").value;
+  // 将远征队输入的坐标换算回给后端的绝对坐标
+  const inputPos = [
+    Number(document.querySelector("#expedition-x").value),
+    Number(document.querySelector("#expedition-y").value)
+  ];
+  const absPos = state.useRelativeCoords ? toAbsolutePos(inputPos) : inputPos;
   const payload = {
     id: rawId ? Number(rawId) : null,
     name: document.querySelector("#expedition-name").value,
     ranger_count: Number(document.querySelector("#expedition-ranger").value),
     vanguard_count: Number(document.querySelector("#expedition-vanguard").value),
-    target_x: Number(document.querySelector("#expedition-x").value),
-    target_y: Number(document.querySelector("#expedition-y").value),
+    target_x: absPos[0],
+    target_y: absPos[1],
     enabled: document.querySelector("#expedition-enabled").checked,
   };
   try {
@@ -997,3 +1216,39 @@ refreshControl();
 setInterval(refreshTicks, 5000);
 setInterval(refreshLeaderboard, 15000);
 setInterval(refreshControl, 5000);
+
+let isAllCollapsed = false;
+
+// 折叠 / 展开指定栏目
+function toggleSection(element, forceState) {
+  if (!element) return;
+  if (typeof forceState === "boolean") {
+    element.classList.toggle("section-collapsed", forceState);
+  } else {
+    element.classList.toggle("section-collapsed");
+  }
+}
+
+// “全部折叠 / 展开” 按钮事件
+document.querySelector("#toggle-all-control")?.addEventListener("click", () => {
+  isAllCollapsed = !isAllCollapsed;
+  const sections = document.querySelectorAll("#control-panel .config-form, #control-panel .order-form, #control-panel .control-section");
+  sections.forEach((sec) => toggleSection(sec, isAllCollapsed));
+  document.querySelector("#toggle-all-control").textContent = isAllCollapsed ? "全部展开" : "全部折叠";
+});
+
+// 点击单个栏目标题进行折叠/展开
+document.querySelector("#control-panel")?.addEventListener("click", (event) => {
+  const header = event.target.closest("h3");
+  if (!header) return;
+  const section = header.closest(".config-form, .order-form, .control-section");
+  if (section) {
+    toggleSection(section);
+  }
+});
+
+// 相对坐标模式开关监听
+document.querySelector("#toggle-relative-coord")?.addEventListener("change", (event) => {
+  state.useRelativeCoords = event.target.checked;
+  draw();
+});

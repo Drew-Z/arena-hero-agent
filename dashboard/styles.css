@@ -177,6 +177,133 @@ button:focus-visible, input:focus-visible, canvas:focus-visible { outline: 2px s
   pointer-events: none;
 }
 
+.hover-tooltip {
+  position: absolute;
+  z-index: 5;
+  padding: 4px 8px;
+  background: rgba(10, 14, 17, 0.92);
+  border: 1px solid var(--gold);
+  border-radius: 3px;
+  color: #edf4f7;
+  font-size: 11px;
+  font-family: monospace, sans-serif;
+  pointer-events: none;
+  white-space: nowrap;
+  transform: translate(-50%, -100%);
+  margin-top: -8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  transition: opacity 0.15s ease;
+}
+
+.hover-tooltip.hidden {
+  display: none;
+}
+
+
+.control-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 14px;
+  background: #0b1013;
+  border-bottom: 1px solid var(--border);
+}
+
+.control-toolbar button {
+  height: 26px;
+  padding: 0 10px;
+  font-size: 11px;
+}
+
+
+.config-form h3, .order-form h3, .control-section h3 {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.order-form h3 {
+  grid-column: 1 / -1;
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: #edf4f7;
+}
+
+.config-form h3::after, .order-form h3::after, .control-section h3::after {
+  content: "▾";
+  font-size: 12px;
+  color: #77858e;
+  transition: transform 0.2s ease;
+}
+
+
+.section-collapsed h3::after {
+  transform: rotate(-90deg);
+}
+
+
+.config-form.section-collapsed > *:not(h3),
+.order-form.section-collapsed > *:not(h3),
+.control-section.section-collapsed > *:not(h3) {
+  display: none !important;
+}
+
+.section-collapsed + #expedition-list {
+  display: none !important;
+}
+/* 地图工具栏分割线与兵种筛选按钮组 */
+.toolbar-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  margin: 0 3px;
+}
+
+.unit-filter-group {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: #0c1114;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+
+.unit-filter-btn {
+  height: 24px;
+  padding: 0 7px;
+  font-size: 11px;
+  color: #9ba8b1;
+  background: transparent;
+  border: 0;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.unit-filter-btn:hover {
+  background: #192127;
+  color: #edf4f7;
+}
+
+.unit-filter-btn.active {
+  background: var(--cyan);
+  color: #071014;
+  font-weight: 700;
+}
+.relative-coord-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--gold);
+  cursor: pointer;
+  user-select: none;
+}
+
+.relative-coord-label input {
+  accent-color: var(--gold);
+}
 @media (max-width: 1050px) {
   :root { --panel-width: 280px; }
   .metrics span:nth-child(4), .metrics span:nth-child(5) { display: none; }

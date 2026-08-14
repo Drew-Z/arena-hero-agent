@@ -40,6 +40,17 @@
         <label><input type="checkbox" data-map-layer="resources" checked> 资源</label>
         <label><input type="checkbox" data-map-layer="history" checked> 历史</label>
         <label><input type="checkbox" data-map-layer="routes"> 路线</label>
+        <div class="toolbar-divider"></div>
+		<div class="unit-filter-group" role="group" aria-label="兵种筛选">
+			<button type="button" class="unit-filter-btn active" data-unit-filter="ALL">全部</button>
+			<button type="button" class="unit-filter-btn" data-unit-filter="WORKER">工兵 W</button>
+			<button type="button" class="unit-filter-btn" data-unit-filter="VANGUARD">先锋 V</button>
+			<button type="button" class="unit-filter-btn" data-unit-filter="RANGER">游侠 R</button>
+		</div>
+		<div class="toolbar-divider"></div>
+			<label class="relative-coord-label">
+				<input type="checkbox" id="toggle-relative-coord"> 相对 Core 坐标
+			</label>
       </div>
       <div class="legend" aria-label="地图图例">
         <span><i class="swatch explored"></i>已探索</span>
@@ -54,6 +65,7 @@
       </div>
       <div id="map-status" class="map-status">等待历史数据</div>
       <div id="cursor-position" class="cursor-position">x -- · y --</div>
+      <div id="hover-tooltip" class="hover-tooltip hidden"></div>
     </section>
 
     <aside class="intel-panel">
@@ -74,6 +86,9 @@
         <ol id="ranking-list" class="ranking-list"></ol>
       </section>
       <section id="control-panel" class="panel-view hidden" role="tabpanel">
+		<div class="control-toolbar">
+			<button id="toggle-all-control" type="button" class="secondary-button">全部折叠</button>
+		</div>
         <form id="production-form" class="config-form">
           <h3>生产比例</h3>
           <label>Worker <input id="production-worker" type="number" min="0" max="100" value="4" required></label>
@@ -97,6 +112,7 @@
         </form>
         <ol id="expedition-list" class="event-list"></ol>
         <form id="order-form" class="order-form">
+        <h3>手动派遣</h3>
           <label>兵种
             <select id="order-unit-type">
               <option value="CORE">核心</option>
