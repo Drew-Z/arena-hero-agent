@@ -88,6 +88,14 @@ Optional PowerShell overrides use a single dash:
 .\start_agent.ps1 -WorkerTarget 18 -BeaconPolicy pursue -HistoryDb .\arena_history.sqlite3
 ```
 
+Run two accounts in the same CMD window and dashboard. The first launch securely prompts for the secondary API key:
+
+```powershell
+.\start_agent.ps1 -SecondaryEnvFile .\.env.secondary
+```
+
+The accounts keep separate history databases while sharing local alliance identity and scout coverage. The dashboard merges explored cells, obstacles, resource history, and enemy vision, and both tactics treat the other account's Core and Units as allies.
+
 Stop the foreground Agent with `Ctrl+C`; the dashboard process started by it is stopped at the same time. Code changes require an Agent restart.
 
 ## Production deployment note

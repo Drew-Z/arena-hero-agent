@@ -5,10 +5,8 @@ const context = canvas.getContext("2d", { alpha: false });
 const MAP_CHUNK_SIZE = 32;
 const MAP_LAYERS = ["explored", "obstacles", "resource_history"];
 const ui = {
+  accountStatus: document.querySelector("#account-status"),
   tick: document.querySelector("#metric-tick"),
-  resources: document.querySelector("#metric-resources"),
-  population: document.querySelector("#metric-population"),
-  force: document.querySelector("#metric-force"),
   posture: document.querySelector("#metric-posture"),
   enemies: document.querySelector("#metric-enemies"),
   status: document.querySelector("#map-status"),
@@ -362,11 +360,14 @@ function drawCore(item, relation, historical = false) {
   context.restore();
 }
 
-function drawUnit(item, relation) {
+function drawUnit(item, relation, historical = false) {
   const [x, y] = screenPosition(item.position);
   const radius = Math.max(2.5, state.view.scale * 0.28);
   const friendly = relation === "friendly";
   const allied = relation === "ally";
+  context.save();
+  context.globalAlpha = historical ? 0.42 : 1;
+  context.setLineDash(historical ? [3, 2] : []);
   context.fillStyle = allied ? colors.ally : friendly ? colors.friendly : colors.enemy;
   context.strokeStyle = allied ? "#ffe0e7" : friendly ? "#a8e8ff" : "#ffb0b3";
   context.lineWidth = 1;
@@ -389,6 +390,7 @@ function drawUnit(item, relation) {
   }
   context.fill();
   context.stroke();
+  context.restore();
 }
 
 function drawPlan(overview, objectById) {
@@ -485,6 +487,9 @@ function draw() {
   (state.layers.history ? overview.enemy_core_history : [])
     .filter((item) => !item.currently_visible && !allianceIds.has(item.core_id))
     .forEach((item) => drawCore(item, "enemy", true));
+  (state.layers.history ? overview.enemy_unit_history || [] : [])
+    .filter((item) => !item.currently_visible && !allianceIds.has(item.id) && shouldDrawObject(item))
+    .forEach((item) => drawUnit(item, "enemy", true));
 
   const objectById = new Map();
   for (const item of objects) {
@@ -525,10 +530,18 @@ function draw() {
 function setTargetPicking(active, mode = "order") {
   state.pickingTarget = active;
   state.pickMode = active ? mode : null;
-  ui.pickTarget.classList.toggle("active", active);
+  ui.pickTarget.classList.toggle("active", active && mode === "order");
   ui.pickExpeditionTarget.classList.toggle("active", active && mode === "expedition");
-  ui.pickTarget.textContent = active ? "点击地图选择目标（可拖动）" : "在地图上选择目标";
+  const targetButtonText = state.orderTarget ? "隐藏地图选点" : "在地图上选择目标";
+  ui.pickTarget.textContent = active && mode === "order" ? "取消选点" : targetButtonText;
+  ui.pickExpeditionTarget.textContent = active && mode === "expedition" ? "取消选点" : targetButtonText;
   canvas.classList.toggle("picking-target", active);
+}
+
+function clearMapTarget() {
+  state.orderTarget = null;
+  setTargetPicking(false);
+  draw();
 }
 
 function fitMap() {
@@ -554,27 +567,43 @@ function controlledCore() {
 function centerMap(force = false) {
   const core = controlledCore();
   if (!core || (state.centered && !force)) return;
-  state.view.x = core.position[0];
-  state.view.y = core.position[1];
+  centerMapAt(core.position);
+}
+
+function centerMapAt(position) {
+  if (!Array.isArray(position) || position.length !== 2) return;
+  state.view.x = position[0];
+  state.view.y = position[1];
   state.centered = true;
   draw();
+}
+
+function renderAccountStatus(accounts) {
+  ui.accountStatus.replaceChildren();
+  accounts.forEach((account) => {
+    const button = document.createElement("button");
+    const role = account.role === "primary" ? "主" : "小";
+    const username = account.username ? `@${account.username}` : "未识别";
+    const capacity = Math.max(10, account.population * 5);
+    button.type = "button";
+    button.className = `account-summary ${account.role}`;
+    button.title = `${username} · Tick ${account.tick} · 点击定位 Core`;
+    button.disabled = !account.core_position;
+    button.textContent = `${role} ${username} · 资源 ${account.resources}/${capacity} · 人口 ${account.population} · ${account.workers}W ${account.vanguards}V ${account.rangers}R`;
+    button.addEventListener("click", () => centerMapAt(account.core_position));
+    ui.accountStatus.append(button);
+  });
 }
 
 function updateMetrics() {
   const overview = state.overview;
   if (!overview?.available) return;
   const game = overview.state;
-  const units = game.objects.filter((item) => item.kind === "UNIT" && item.controlled);
-  const workers = units.filter((item) => item.unit_type === "WORKER").length;
-  const vanguards = units.filter((item) => item.unit_type === "VANGUARD").length;
-  const rangers = units.filter((item) => item.unit_type === "RANGER").length;
   const enemies = Number.isInteger(overview.enemy_count)
     ? overview.enemy_count
     : game.objects.filter((item) => item.controlled === false && item.relation !== "ALLY").length;
+  renderAccountStatus(overview.accounts || []);
   ui.tick.textContent = overview.tick;
-  ui.resources.textContent = `${game.resources}/${Math.max(10, game.population * 5)}`;
-  ui.population.textContent = game.population;
-  ui.force.textContent = `${workers}W ${vanguards}V ${rangers}R`;
   ui.posture.textContent = overview.strategy.phase || overview.strategy.posture || "--";
   ui.enemies.textContent = enemies;
   const mode = state.live ? "实时" : "历史";
@@ -895,6 +924,7 @@ async function refreshControl() {
     }
     const alliance = controlConfig.alliance;
     if (alliance && document.activeElement?.form !== ui.allianceForm) {
+      document.querySelector("#alliance-rally-enabled").checked = alliance.rally_enabled;
       document.querySelector("#alliance-rally-radius").value = alliance.rally_radius;
     }
   } catch (error) {
@@ -1049,11 +1079,24 @@ document.querySelectorAll("[data-map-layer]").forEach((input) => input.addEventL
   state.layers[input.dataset.mapLayer] = input.checked;
   draw();
 }));
-ui.pickTarget.addEventListener("click", () => setTargetPicking(!state.pickingTarget, "order"));
-ui.pickExpeditionTarget.addEventListener("click", () => setTargetPicking(!state.pickingTarget, "expedition"));
+ui.pickTarget.addEventListener("click", () => {
+  if (state.orderTarget || (state.pickingTarget && state.pickMode === "order")) {
+    clearMapTarget();
+    return;
+  }
+  setTargetPicking(true, "order");
+});
+ui.pickExpeditionTarget.addEventListener("click", () => {
+  if (state.orderTarget || (state.pickingTarget && state.pickMode === "expedition")) {
+    clearMapTarget();
+    return;
+  }
+  setTargetPicking(true, "expedition");
+});
 [ui.orderX, ui.orderY].forEach((input) => input.addEventListener("change", () => {
   const position = [Number(ui.orderX.value), Number(ui.orderY.value)];
   state.orderTarget = position.every(Number.isSafeInteger) ? position : null;
+  setTargetPicking(false);
   draw();
 }));
 
@@ -1160,6 +1203,7 @@ ui.productionForm.addEventListener("submit", async (event) => {
 ui.allianceForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const payload = {
+    rally_enabled: document.querySelector("#alliance-rally-enabled").checked,
     rally_radius: Number(document.querySelector("#alliance-rally-radius").value),
   };
   try {
@@ -1168,7 +1212,9 @@ ui.allianceForm.addEventListener("submit", async (event) => {
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.message || response.statusText);
-    ui.allianceStatus.textContent = `靠拢距离已设为 ${result.rally_radius} 格，将在下个 Tick 生效`;
+    ui.allianceStatus.textContent = result.rally_enabled
+      ? `联盟靠拢已开启，距离 ${result.rally_radius} 格，将在下个 Tick 生效`
+      : "联盟靠拢已关闭，Core 将保持原地发育";
     await refreshControl();
   } catch (error) {
     ui.allianceStatus.textContent = `保存失败 · ${error.message}`;

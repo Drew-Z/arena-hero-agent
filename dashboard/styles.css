@@ -50,6 +50,7 @@ button:focus-visible, input:focus-visible, canvas:focus-visible { outline: 2px s
 .metrics {
   min-width: 0;
   display: flex;
+  align-items: center;
   gap: 18px;
   overflow: hidden;
   color: #9eabb4;
@@ -58,6 +59,20 @@ button:focus-visible, input:focus-visible, canvas:focus-visible { outline: 2px s
 }
 
 .metrics strong { color: #edf4f7; font-weight: 650; }
+
+.account-status { min-width: 0; display: flex; gap: 6px; overflow: hidden; }
+.account-summary {
+  flex: 0 0 auto;
+  height: 32px;
+  padding: 0 9px;
+  color: #dce8ed;
+  border-color: #326477;
+  background: #12232a;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.account-summary.secondary { border-color: #805866; background: #281b20; }
+.account-summary:disabled { cursor: default; opacity: 0.7; }
 
 .controls { display: flex; align-items: center; gap: 6px; }
 .icon-button { width: 34px; height: 34px; padding: 0; font-size: 19px; line-height: 1; }
@@ -305,8 +320,12 @@ button:focus-visible, input:focus-visible, canvas:focus-visible { outline: 2px s
   accent-color: var(--gold);
 }
 @media (max-width: 1050px) {
-  :root { --panel-width: 280px; }
-  .metrics span:nth-child(4), .metrics span:nth-child(5) { display: none; }
+  :root { --topbar-height: 100px; --panel-width: 280px; }
+  .topbar { grid-template-columns: 1fr auto; grid-template-rows: 44px 44px; gap: 0 8px; padding: 6px 10px; }
+  .brand { grid-column: 1; grid-row: 1; }
+  .metrics { grid-column: 1 / -1; grid-row: 2; gap: 12px; }
+  .controls { grid-column: 2; grid-row: 1; }
+  .secondary-metric { display: none; }
   #tick-slider { width: 105px; }
 }
 
@@ -315,7 +334,8 @@ button:focus-visible, input:focus-visible, canvas:focus-visible { outline: 2px s
   .topbar { grid-template-columns: 1fr auto; grid-template-rows: 44px 44px; gap: 0 8px; padding: 6px 10px; }
   .brand { font-size: 15px; }
   .metrics { grid-column: 1 / -1; grid-row: 2; gap: 12px; }
-  .metrics span:nth-child(5), .metrics span:nth-child(6) { display: none; }
+  .metrics > span { display: none; }
+  .account-status { overflow-x: auto; }
   .controls { grid-column: 2; grid-row: 1; }
   .controls #tick-slider, .controls #previous-tick, .controls #next-tick, .controls #zoom-out, .controls #zoom-in { display: none; }
   .workspace { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) 280px; }

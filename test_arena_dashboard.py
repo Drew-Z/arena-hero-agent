@@ -34,21 +34,25 @@ from arena_history import (
 CORE_ID = "00000000-0000-4000-8000-000000000001"
 WORKER_ID = "00000000-0000-4000-8000-000000000002"
 ENEMY_CORE_ID = "10000000-0000-4000-8000-000000000001"
+ENEMY_UNIT_ID = "10000000-0000-4000-8000-000000000002"
 
 
 def make_turn(
     tick: int = 41,
     *,
+    core_position: tuple[int, int] = (0, 0),
     enemy_position: tuple[int, int] | None = (4, 0),
+    enemy_unit_position: tuple[int, int] | None = None,
     events: list[dict[str, object]] | None = None,
 ) -> Turn:
+    core_x, core_y = core_position
     objects = [
         {
             "kind": "CORE",
             "id": CORE_ID,
             "controlled": True,
             "owner_username": "commander",
-            "position": [0, 0],
+            "position": [core_x, core_y],
             "hp": 5,
             "shield": 5,
             "state": "NORMAL",
@@ -57,13 +61,13 @@ def make_turn(
             "kind": "UNIT",
             "id": WORKER_ID,
             "controlled": True,
-            "position": [1, 0],
+            "position": [core_x + 1, core_y],
             "hp": 2,
             "unit_type": "WORKER",
             "cargo": 0,
         },
-        {"kind": "RESOURCE", "positions": [[2, 0]]},
-        {"kind": "OBSTACLE", "positions": [[0, 2]]},
+        {"kind": "RESOURCE", "positions": [[core_x + 2, core_y]]},
+        {"kind": "OBSTACLE", "positions": [[core_x, core_y + 2]]},
     ]
     if enemy_position is not None:
         objects.append(
@@ -76,6 +80,17 @@ def make_turn(
                 "hp": 4,
                 "shield": 1,
                 "state": "NORMAL",
+            }
+        )
+    if enemy_unit_position is not None:
+        objects.append(
+            {
+                "kind": "UNIT",
+                "id": ENEMY_UNIT_ID,
+                "controlled": False,
+                "position": list(enemy_unit_position),
+                "hp": 2,
+                "unit_type": "RANGER",
             }
         )
     state = PlayerState.model_validate(
@@ -345,6 +360,22 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(visible["age_ticks"], 0)
             self.assertEqual((visible["x"], visible["y"]), (5, 0))
 
+    def test_enemy_unit_history_keeps_last_seen_position(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            with HistoryRecorder(path) as recorder:
+                recorder.record(
+                    make_turn(41, enemy_unit_position=(-390, 578))
+                )
+                recorder.record(make_turn(42))
+
+            hidden = read_overview(path, tick=42)["enemy_unit_history"][0]
+
+            self.assertFalse(hidden["currently_visible"])
+            self.assertEqual(hidden["last_seen_tick"], 41)
+            self.assertEqual(hidden["age_ticks"], 1)
+            self.assertEqual(hidden["position"], [-390, 578])
+
     def test_destroyed_enemy_core_is_removed_from_later_history(self) -> None:
         destruction = {
             "event_id": "20000000-0000-4000-8000-000000000030",
@@ -425,11 +456,12 @@ class HistoryTests(unittest.TestCase):
                 target=(12, -8),
                 enabled=True,
             )
-            save_alliance_config(path, rally_radius=24)
+            save_alliance_config(path, rally_enabled=True, rally_radius=24)
 
             config = read_control_config(path)
 
             self.assertEqual(config["production"]["ranger_weight"], 2)
+            self.assertTrue(config["alliance"]["rally_enabled"])
             self.assertEqual(config["alliance"]["rally_radius"], 24)
             self.assertEqual(config["expeditions"][0]["name"], "strike-1")
             self.assertTrue(config["expeditions"][0]["enabled"])
@@ -437,9 +469,13 @@ class HistoryTests(unittest.TestCase):
     def test_alliance_config_defaults_to_twelve_and_validates_range(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "history.sqlite3"
-            self.assertEqual(read_control_config(path)["alliance"]["rally_radius"], 12)
+            alliance = read_control_config(path)["alliance"]
+            self.assertFalse(alliance["rally_enabled"])
+            self.assertEqual(alliance["rally_radius"], 12)
             with self.assertRaisesRegex(ValueError, "between 1 and 256"):
-                save_alliance_config(path, rally_radius=0)
+                save_alliance_config(path, rally_enabled=False, rally_radius=0)
+            with self.assertRaisesRegex(ValueError, "must be a boolean"):
+                save_alliance_config(path, rally_enabled=1, rally_radius=12)
 
     def test_history_limit_removes_old_snapshots_and_core_sightings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -454,6 +490,117 @@ class HistoryTests(unittest.TestCase):
 
 
 class DashboardTests(unittest.TestCase):
+    def test_dual_account_overview_merges_vision_without_changing_primary_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            primary_db = root / "primary.sqlite3"
+            secondary_db = root / "secondary.sqlite3"
+            with HistoryRecorder(primary_db) as recorder:
+                recorder.record(make_turn(enemy_position=None))
+            with HistoryRecorder(secondary_db) as recorder:
+                recorder.record(
+                    make_turn(
+                        core_position=(100, 100),
+                        enemy_position=(104, 100),
+                    )
+                )
+            app = DashboardApplication(
+                history_db=primary_db,
+                static_root=Path(__file__).with_name("dashboard"),
+                allied_history_dbs=(secondary_db,),
+            )
+
+            overview = app.overview()
+            explored = {(item[0], item[1]) for item in overview["explored"]}
+            current_ids = {
+                item.get("id")
+                for item in overview["state"]["objects"]
+                if isinstance(item, dict)
+            }
+
+            self.assertIn((0, 0), explored)
+            self.assertIn((100, 100), explored)
+            self.assertIn(ENEMY_CORE_ID, current_ids)
+            self.assertEqual(overview["state"]["population"], 1)
+            self.assertEqual(
+                overview["accounts"],
+                [
+                    {
+                        "role": "primary",
+                        "username": "commander",
+                        "tick": 41,
+                        "resources": 37,
+                        "population": 1,
+                        "workers": 1,
+                        "vanguards": 0,
+                        "rangers": 0,
+                        "core_position": [0, 0],
+                    },
+                    {
+                        "role": "secondary",
+                        "username": "commander",
+                        "tick": 41,
+                        "resources": 37,
+                        "population": 1,
+                        "workers": 1,
+                        "vanguards": 0,
+                        "rangers": 0,
+                        "core_position": [100, 100],
+                    },
+                ],
+            )
+
+    def test_single_account_overview_has_one_account_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            history = root / "history.sqlite3"
+            with HistoryRecorder(history) as recorder:
+                recorder.record(make_turn())
+            app = DashboardApplication(
+                history_db=history,
+                static_root=Path(__file__).with_name("dashboard"),
+            )
+
+            accounts = app.overview()["accounts"]
+
+            self.assertEqual(len(accounts), 1)
+            self.assertEqual(accounts[0]["role"], "primary")
+            self.assertEqual(accounts[0]["resources"], 37)
+            self.assertEqual(accounts[0]["workers"], 1)
+
+    def test_dashboard_renders_account_status_and_core_location_control(self) -> None:
+        dashboard_root = Path(__file__).with_name("dashboard")
+        html = (dashboard_root / "index.html").read_text(encoding="utf-8")
+        script = (dashboard_root / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="account-status"', html)
+        self.assertIn("function renderAccountStatus(accounts)", script)
+        self.assertIn("centerMapAt(account.core_position)", script)
+
+    def test_dashboard_exposes_alliance_rally_toggle(self) -> None:
+        dashboard_root = Path(__file__).with_name("dashboard")
+        html = (dashboard_root / "index.html").read_text(encoding="utf-8")
+        script = (dashboard_root / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="alliance-rally-enabled"', html)
+        self.assertIn('rally_enabled: document.querySelector', script)
+
+    def test_windows_launcher_uses_lightweight_dashboard_healthcheck(self) -> None:
+        launcher = Path(__file__).with_name("start_agent.ps1").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('api/overview?history=0', launcher)
+
+    def test_map_target_can_be_hidden_without_reloading(self) -> None:
+        script = (
+            Path(__file__).with_name("dashboard") / "app.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("function clearMapTarget()", script)
+        self.assertIn("state.orderTarget = null;", script)
+        self.assertIn('"隐藏地图选点"', script)
+
     def test_dispatch_ui_supports_all_and_core_distance_selection(self) -> None:
         dashboard_root = Path(__file__).with_name("dashboard")
         html = (dashboard_root / "index.html").read_text(encoding="utf-8")
@@ -594,7 +741,7 @@ class DashboardTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
 
-    def test_alliance_config_endpoint_updates_rally_radius(self) -> None:
+    def test_alliance_config_endpoint_updates_all_account_databases(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             static = root / "dashboard"
@@ -602,6 +749,7 @@ class DashboardTests(unittest.TestCase):
             app = DashboardApplication(
                 history_db=root / "history.sqlite3",
                 static_root=static,
+                allied_history_dbs=(root / "secondary.sqlite3",),
             )
             server = DashboardServer(("127.0.0.1", 0), app)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -611,20 +759,19 @@ class DashboardTests(unittest.TestCase):
                 connection.request(
                     "POST",
                     "/api/alliance-config",
-                    body=json.dumps({"rally_radius": 24}),
+                    body=json.dumps({"rally_enabled": True, "rally_radius": 24}),
                     headers={"Content-Type": "application/json"},
                 )
                 response = connection.getresponse()
                 payload = json.loads(response.read())
 
                 self.assertEqual(response.status, 201)
+                self.assertTrue(payload["rally_enabled"])
                 self.assertEqual(payload["rally_radius"], 24)
-                self.assertEqual(
-                    read_control_config(root / "history.sqlite3")["alliance"][
-                        "rally_radius"
-                    ],
-                    24,
-                )
+                for name in ("history.sqlite3", "secondary.sqlite3"):
+                    alliance = read_control_config(root / name)["alliance"]
+                    self.assertTrue(alliance["rally_enabled"])
+                    self.assertEqual(alliance["rally_radius"], 24)
             finally:
                 server.shutdown()
                 server.server_close()

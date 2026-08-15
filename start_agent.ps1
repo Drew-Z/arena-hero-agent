@@ -12,7 +12,19 @@ param(
     [ValidateRange(1, 65535)]
     [int]$DashboardPort = 8765,
     [switch]$NoDashboard,
-    [switch]$NoCompatibilityMarker
+    [switch]$NoCompatibilityMarker,
+    [string]$AllianceRosterUrl,
+    [string]$AllianceRosterTokenFile,
+    [ValidateRange(0.1, 3600.0)]
+    [double]$AllianceRosterRefreshSeconds = 15.0,
+    [ValidateRange(0.1, 60.0)]
+    [double]$AllianceRosterTimeoutSeconds = 5.0,
+    [string]$SecondaryEnvFile,
+    [string]$SecondaryLogFile = "arena_farmer.secondary.log",
+    [string]$SecondaryHistoryDb = "arena_history.secondary.sqlite3",
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$')]
+    [string]$InstanceName = "primary",
+    [switch]$EnvFileOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,8 +57,36 @@ $envPath = Resolve-ProjectPath $EnvFile
 $logPath = Resolve-ProjectPath $LogFile
 $historyPath = Resolve-ProjectPath $HistoryDb
 $dashboardUrl = "http://127.0.0.1:$DashboardPort/"
-$dashboardLogPath = Join-Path $projectRoot "arena_dashboard.log"
-$dashboardErrorLogPath = Join-Path $projectRoot "arena_dashboard.error.log"
+$instanceSuffix = if ($InstanceName -eq "primary") { "" } else { ".$InstanceName" }
+$dashboardLogPath = Join-Path $projectRoot "arena_dashboard$instanceSuffix.log"
+$dashboardErrorLogPath = Join-Path $projectRoot "arena_dashboard$instanceSuffix.error.log"
+$localAllianceDirectory = Join-Path $projectRoot "state\local-alliance"
+$localAllianceId = "local-duo"
+$hasSecondary = -not [string]::IsNullOrWhiteSpace($SecondaryEnvFile)
+$localAllianceEnabled = $hasSecondary -or $InstanceName -eq "secondary"
+$allianceExpectedMembers = if ($localAllianceEnabled) { 2 } else { 1 }
+$secondaryEnvPath = if ($hasSecondary) { Resolve-ProjectPath $SecondaryEnvFile } else { $null }
+$secondaryLogPath = if ($hasSecondary) { Resolve-ProjectPath $SecondaryLogFile } else { $null }
+$secondaryHistoryPath = if ($hasSecondary) { Resolve-ProjectPath $SecondaryHistoryDb } else { $null }
+if ($hasSecondary -and (
+    $secondaryEnvPath -eq $envPath -or
+    $secondaryLogPath -eq $logPath -or
+    $secondaryHistoryPath -eq $historyPath
+)) {
+    throw "Secondary account files must be separate from the primary account files."
+}
+$hasAllianceRosterUrl = -not [string]::IsNullOrWhiteSpace($AllianceRosterUrl)
+$hasAllianceRosterTokenFile = -not [string]::IsNullOrWhiteSpace($AllianceRosterTokenFile)
+if ($hasAllianceRosterUrl -ne $hasAllianceRosterTokenFile) {
+    throw "Alliance roster URL and token file must be configured together."
+}
+$allianceRosterTokenPath = $null
+if ($hasAllianceRosterTokenFile) {
+    $allianceRosterTokenPath = Resolve-ProjectPath $AllianceRosterTokenFile
+    if (-not (Test-Path -LiteralPath $allianceRosterTokenPath -PathType Leaf)) {
+        throw "Alliance roster token file is missing: $allianceRosterTokenPath"
+    }
+}
 
 function Invoke-AgentLogRotation {
     if (-not (Test-Path -LiteralPath $logPath)) {
@@ -73,25 +113,34 @@ if (-not (Test-Path -LiteralPath $PythonPath -PathType Leaf)) {
     throw "Python environment is missing. Run .\scripts\bootstrap.ps1 first. Expected: $PythonPath"
 }
 
-$keyInEnvironment = -not [string]::IsNullOrWhiteSpace($env:ARENA_HERO_API_KEY)
-$keyInFile = (Test-Path -LiteralPath $envPath -PathType Leaf) -and
-    (Select-String -LiteralPath $envPath -Pattern '^\s*ARENA_HERO_API_KEY\s*=\s*\S+' -Quiet) -and
-    -not (Select-String -LiteralPath $envPath -Pattern '^\s*ARENA_HERO_API_KEY\s*=\s*(replace-with|your-|<)' -Quiet)
-if (-not $keyInEnvironment -and -not $keyInFile) {
-    Write-Host "No Arena Hero API key was found. The key will be appended to $envPath."
-    $secureKey = Read-Host "Enter the current Arena Hero API key" -AsSecureString
+function Test-ApiKeyFile {
+    param([Parameter(Mandatory)][string]$Path)
+
+    return (Test-Path -LiteralPath $Path -PathType Leaf) -and
+        (Select-String -LiteralPath $Path -Pattern '^\s*ARENA_HERO_API_KEY\s*=\s*\S+' -Quiet) -and
+        -not (Select-String -LiteralPath $Path -Pattern '^\s*ARENA_HERO_API_KEY\s*=\s*(replace-with|your-|<)' -Quiet)
+}
+
+function Initialize-ApiKeyFile {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    Write-Host "No $Label Arena Hero API key was found. It will be appended to $Path."
+    $secureKey = Read-Host "Enter the $Label Arena Hero API key" -AsSecureString
     $keyPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey)
     try {
         $plainKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($keyPointer)
         if ([string]::IsNullOrWhiteSpace($plainKey)) {
             throw "API key cannot be empty."
         }
-        $parent = Split-Path -Parent $envPath
+        $parent = Split-Path -Parent $Path
         if ($parent) {
             [IO.Directory]::CreateDirectory($parent) | Out-Null
         }
-        $existing = if (Test-Path -LiteralPath $envPath) {
-            [IO.File]::ReadAllText($envPath)
+        $existing = if (Test-Path -LiteralPath $Path) {
+            [IO.File]::ReadAllText($Path)
         }
         else {
             ""
@@ -100,7 +149,7 @@ if (-not $keyInEnvironment -and -not $keyInFile) {
             $existing += [Environment]::NewLine
         }
         [IO.File]::WriteAllText(
-            $envPath,
+            $Path,
             $existing + "ARENA_HERO_API_KEY=$($plainKey.Trim())" + [Environment]::NewLine,
             [Text.UTF8Encoding]::new($false)
         )
@@ -111,6 +160,18 @@ if (-not $keyInEnvironment -and -not $keyInFile) {
     }
 }
 
+if ($EnvFileOnly) {
+    Remove-Item Env:ARENA_HERO_API_KEY -ErrorAction SilentlyContinue
+}
+$keyInEnvironment = -not $EnvFileOnly -and
+    -not [string]::IsNullOrWhiteSpace($env:ARENA_HERO_API_KEY)
+if (-not $keyInEnvironment -and -not (Test-ApiKeyFile $envPath)) {
+    Initialize-ApiKeyFile $envPath $InstanceName
+}
+if ($hasSecondary -and -not (Test-ApiKeyFile $secondaryEnvPath)) {
+    Initialize-ApiKeyFile $secondaryEnvPath "secondary"
+}
+
 $agentArguments = @(
     $agentPath,
     "--env-file", $envPath,
@@ -118,18 +179,36 @@ $agentArguments = @(
     "--beacon-policy", $BeaconPolicy,
     "--history-db", $historyPath
 )
+if ($localAllianceEnabled) {
+    $agentArguments += @(
+        "--alliance-directory", $localAllianceDirectory,
+        "--alliance-id", $localAllianceId,
+        "--alliance-account-id", $InstanceName,
+        "--alliance-expected-members", $allianceExpectedMembers
+    )
+}
 if (-not [string]::IsNullOrWhiteSpace($BaseUrl)) {
     $agentArguments += @("--base-url", $BaseUrl)
 }
 if ($NoCompatibilityMarker) {
     $agentArguments += "--no-compatibility-marker"
 }
+if ($hasAllianceRosterUrl) {
+    $agentArguments += @(
+        "--alliance-roster-url", $AllianceRosterUrl.Trim(),
+        "--alliance-roster-token-file", $allianceRosterTokenPath,
+        "--alliance-roster-refresh-seconds",
+        $AllianceRosterRefreshSeconds.ToString([Globalization.CultureInfo]::InvariantCulture),
+        "--alliance-roster-timeout-seconds",
+        $AllianceRosterTimeoutSeconds.ToString([Globalization.CultureInfo]::InvariantCulture)
+    )
+}
 
 function Test-DashboardReady {
     try {
         $requestParameters = @{
             UseBasicParsing = $true
-            Uri = "${dashboardUrl}api/overview"
+            Uri = "${dashboardUrl}api/overview?history=0"
             TimeoutSec = 1
         }
         $response = Invoke-WebRequest @requestParameters
@@ -155,6 +234,15 @@ function Start-AgentDashboard {
         "--host", "127.0.0.1",
         "--port", $DashboardPort
     )
+    if ($localAllianceEnabled) {
+        $arguments += @(
+            "--alliance-directory", ('"{0}"' -f $localAllianceDirectory),
+            "--alliance-account-id", $InstanceName
+        )
+        if ($hasSecondary) {
+            $arguments += @("--allied-history-db", ('"{0}"' -f $secondaryHistoryPath))
+        }
+    }
     $startParameters = @{
         FilePath = $PythonPath
         ArgumentList = $arguments
@@ -180,10 +268,57 @@ function Start-AgentDashboard {
     throw "Dashboard did not become ready. See $dashboardErrorLogPath"
 }
 
+function Start-SecondaryAgent {
+    $arguments = @(
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", ('"{0}"' -f $PSCommandPath),
+        "-InstanceName", "secondary",
+        "-EnvFileOnly",
+        "-EnvFile", ('"{0}"' -f $secondaryEnvPath),
+        "-LogFile", ('"{0}"' -f $secondaryLogPath),
+        "-HistoryDb", ('"{0}"' -f $secondaryHistoryPath),
+        "-WorkerTarget", $WorkerTarget,
+        "-BeaconPolicy", $BeaconPolicy,
+        "-NoDashboard"
+    )
+    if (-not [string]::IsNullOrWhiteSpace($BaseUrl)) {
+        $arguments += @("-BaseUrl", $BaseUrl)
+    }
+    if ($NoCompatibilityMarker) {
+        $arguments += "-NoCompatibilityMarker"
+    }
+    if ($hasAllianceRosterUrl) {
+        $arguments += @(
+            "-AllianceRosterUrl", $AllianceRosterUrl.Trim(),
+            "-AllianceRosterTokenFile", ('"{0}"' -f $allianceRosterTokenPath),
+            "-AllianceRosterRefreshSeconds", $AllianceRosterRefreshSeconds,
+            "-AllianceRosterTimeoutSeconds", $AllianceRosterTimeoutSeconds
+        )
+    }
+
+    $process = Start-Process -FilePath "powershell.exe" -ArgumentList $arguments `
+        -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru
+    Start-Sleep -Milliseconds 300
+    $process.Refresh()
+    if ($process.HasExited) {
+        throw "Secondary Agent failed to start. See $secondaryLogPath"
+    }
+    Write-Host "Secondary Agent running in this launcher. Log: $secondaryLogPath"
+    return $process
+}
+
 Set-Location -LiteralPath $projectRoot
 $stateDirectory = Join-Path $projectRoot "state"
 [IO.Directory]::CreateDirectory($stateDirectory) | Out-Null
-$lockPath = Join-Path $stateDirectory "windows-agent.lock"
+$lockName = if ($InstanceName -eq "primary") {
+    "windows-agent.lock"
+}
+else {
+    "windows-agent.$InstanceName.lock"
+}
+$lockPath = Join-Path $stateDirectory $lockName
 try {
     $instanceLock = [IO.File]::Open(
         $lockPath,
@@ -197,7 +332,11 @@ catch [IO.IOException] {
     exit 2
 }
 $dashboardProcess = $null
+$secondaryProcess = $null
 try {
+    if ($hasSecondary) {
+        $secondaryProcess = Start-SecondaryAgent
+    }
     if (-not $NoDashboard) {
         $dashboardProcess = Start-AgentDashboard
         try {
@@ -239,6 +378,10 @@ try {
     }
 }
 finally {
+    if ($null -ne $secondaryProcess -and -not $secondaryProcess.HasExited) {
+        & taskkill.exe /PID $secondaryProcess.Id /T /F 2>$null | Out-Null
+        $secondaryProcess.WaitForExit()
+    }
     if ($null -ne $dashboardProcess -and -not $dashboardProcess.HasExited) {
         Stop-Process -Id $dashboardProcess.Id -Force -ErrorAction SilentlyContinue
         $dashboardProcess.WaitForExit()

@@ -89,6 +89,14 @@ PowerShell 可选参数使用单横线：
 .\start_agent.ps1 -WorkerTarget 18 -BeaconPolicy pursue -HistoryDb .\arena_history.sqlite3
 ```
 
+双账号使用同一个 CMD 和展示页运行；首次启动会安全提示输入小号 API Key：
+
+```powershell
+.\start_agent.ps1 -SecondaryEnvFile .\.env.secondary
+```
+
+两个账号使用独立历史库并共享本机联盟身份与探索分区。展示页合并双方的已探索格、障碍、资源历史和敌方视野，双方 Core 与单位互相视为盟友。
+
 前台运行时按 `Ctrl+C` 停止，脚本会同时关闭由它启动的展示页进程。修改代码后必须重启 Agent 才会生效。
 
 ## 生产部署说明

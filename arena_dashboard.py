@@ -39,6 +39,125 @@ LEADERBOARD_KEYS = (
 )
 
 
+def _merge_history_overview(
+    overview: dict[str, object],
+    allied: dict[str, object],
+) -> None:
+    if not overview.get("available") or not allied.get("available"):
+        return
+
+    for key in ("explored", "resource_history"):
+        merged: dict[tuple[int, int], list[int]] = {}
+        for item in (*overview.get(key, []), *allied.get(key, [])):
+            x, y, first_seen, last_seen = item
+            position = int(x), int(y)
+            previous = merged.get(position)
+            merged[position] = [
+                position[0],
+                position[1],
+                min(int(first_seen), previous[2]) if previous else int(first_seen),
+                max(int(last_seen), previous[3]) if previous else int(last_seen),
+            ]
+        overview[key] = list(merged.values())
+
+    overview["obstacles"] = [
+        list(position)
+        for position in sorted(
+            {
+                (int(item[0]), int(item[1]))
+                for item in (*overview.get("obstacles", []), *allied.get("obstacles", []))
+            }
+        )
+    ]
+
+    for key, identifier_key in (
+        ("enemy_core_history", "core_id"),
+        ("enemy_unit_history", "id"),
+    ):
+        merged_sightings: dict[str, dict[str, object]] = {}
+        for item in (*overview.get(key, []), *allied.get(key, [])):
+            identifier = str(item[identifier_key])
+            previous = merged_sightings.get(identifier)
+            if previous is None or int(item["last_seen_tick"]) >= int(
+                previous["last_seen_tick"]
+            ):
+                selected = dict(item)
+                selected["currently_visible"] = bool(item.get("currently_visible")) or bool(
+                    previous and previous.get("currently_visible")
+                )
+                merged_sightings[identifier] = selected
+            elif item.get("currently_visible"):
+                previous["currently_visible"] = True
+        overview[key] = list(merged_sightings.values())
+
+    primary_state = overview.get("state")
+    allied_state = allied.get("state")
+    if isinstance(primary_state, dict) and isinstance(allied_state, dict):
+        primary_objects = primary_state.get("objects")
+        allied_objects = allied_state.get("objects")
+        if isinstance(primary_objects, list) and isinstance(allied_objects, list):
+            known_ids = {
+                str(item["id"])
+                for item in primary_objects
+                if isinstance(item, dict) and item.get("id")
+            }
+            for item in allied_objects:
+                if not isinstance(item, dict) or item.get("controlled") is True:
+                    continue
+                identifier = str(item.get("id", ""))
+                if identifier and identifier in known_ids:
+                    continue
+                if identifier:
+                    known_ids.add(identifier)
+                primary_objects.append(dict(item))
+
+    primary_trails = overview.get("trails")
+    allied_trails = allied.get("trails")
+    if isinstance(primary_trails, dict) and isinstance(allied_trails, dict):
+        for identifier, trail in allied_trails.items():
+            primary_trails.setdefault(identifier, trail)
+
+
+def _account_summary(
+    overview: dict[str, object],
+    *,
+    role: str,
+) -> dict[str, object] | None:
+    if not overview.get("available"):
+        return None
+    state = overview.get("state")
+    if not isinstance(state, dict):
+        return None
+    objects = state.get("objects")
+    if not isinstance(objects, list):
+        return None
+    controlled = [
+        item
+        for item in objects
+        if isinstance(item, dict) and item.get("controlled") is True
+    ]
+    core = next((item for item in controlled if item.get("kind") == "CORE"), None)
+    units = [item for item in controlled if item.get("kind") == "UNIT"]
+    core_position = core.get("position") if core is not None else None
+    if not (
+        isinstance(core_position, list)
+        and len(core_position) == 2
+        and all(isinstance(value, int) for value in core_position)
+    ):
+        core_position = None
+    return {
+        "role": role,
+        "username": str(core.get("owner_username", "")) if core is not None else "",
+        "tick": int(overview["tick"]),
+        "resources": int(state.get("resources", 0)),
+        "population": int(state.get("population", 0)),
+        "workers": sum(item.get("unit_type") == "WORKER" for item in units),
+        "vanguards": sum(item.get("unit_type") == "VANGUARD" for item in units),
+        "rangers": sum(item.get("unit_type") == "RANGER" for item in units),
+        "core_position": core_position,
+    }
+
+
 def _validated_leaderboard(value: object) -> dict[str, list[dict[str, object]]]:
     if not isinstance(value, dict):
         raise ValueError("leaderboard response must be an object")
@@ -82,6 +201,7 @@ class DashboardApplication:
         alliance_directory: Path | None = None,
         alliance_account_id: str | None = None,
         alliance_stale_seconds: float = DEFAULT_ALLIANCE_STALE_SECONDS,
+        allied_history_dbs: tuple[Path, ...] = (),
     ) -> None:
         self.history_db = history_db
         self.static_root = static_root.resolve()
@@ -89,6 +209,7 @@ class DashboardApplication:
         self.alliance_directory = alliance_directory
         self.alliance_account_id = alliance_account_id
         self.alliance_stale_seconds = alliance_stale_seconds
+        self.allied_history_dbs = allied_history_dbs
         self._leaderboard_lock = threading.Lock()
         self._leaderboard_at = 0.0
         self._leaderboard: dict[str, list[dict[str, object]]] | None = None
@@ -181,8 +302,41 @@ class DashboardApplication:
             ),
         )
 
+    def update_alliance_config(
+        self,
+        *,
+        rally_enabled: bool,
+        rally_radius: int,
+    ) -> dict[str, object]:
+        result = save_alliance_config(
+            self.history_db,
+            rally_enabled=rally_enabled,
+            rally_radius=rally_radius,
+        )
+        for allied_history_db in self.allied_history_dbs:
+            save_alliance_config(
+                allied_history_db,
+                rally_enabled=rally_enabled,
+                rally_radius=rally_radius,
+            )
+        return result
+
     def overview(self, **kwargs: object) -> dict[str, object]:
         overview = read_overview(self.history_db, **kwargs)
+        accounts = [
+            summary
+            for summary in (_account_summary(overview, role="primary"),)
+            if summary is not None
+        ]
+        for allied_history_db in self.allied_history_dbs:
+            allied_overview = read_overview(allied_history_db, **kwargs)
+            summary = _account_summary(allied_overview, role="secondary")
+            if summary is not None:
+                accounts.append(summary)
+            _merge_history_overview(
+                overview,
+                allied_overview,
+            )
         alliance_objects = self.alliance_objects()
         allied_ids = {str(item["id"]) for item in alliance_objects}
         allied_usernames = {
@@ -211,6 +365,11 @@ class DashboardApplication:
             overview["enemy_core_history"] = [
                 item for item in history if not is_ally(item)
             ]
+        unit_history = overview.get("enemy_unit_history")
+        if isinstance(unit_history, list):
+            overview["enemy_unit_history"] = [
+                item for item in unit_history if not is_ally(item)
+            ]
         overview["enemy_count"] = sum(
             isinstance(item, dict)
             and item.get("kind") in {"CORE", "UNIT"}
@@ -219,6 +378,7 @@ class DashboardApplication:
             for item in objects
         )
         overview["alliance_objects"] = alliance_objects
+        overview["accounts"] = accounts
         return overview
 
     def leaderboard(self) -> dict[str, object]:
@@ -343,8 +503,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     ranger_weight=payload.get("ranger_weight"),
                 )
             elif path == "/api/alliance-config":
-                result = save_alliance_config(
-                    self.server.app.history_db,
+                result = self.server.app.update_alliance_config(
+                    rally_enabled=payload.get("rally_enabled"),
                     rally_radius=payload.get("rally_radius"),
                 )
             else:
@@ -449,6 +609,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--alliance-directory", type=Path)
     parser.add_argument("--alliance-account-id")
     parser.add_argument(
+        "--allied-history-db",
+        action="append",
+        type=Path,
+        default=[],
+    )
+    parser.add_argument(
         "--alliance-stale-seconds",
         type=float,
         default=DEFAULT_ALLIANCE_STALE_SECONDS,
@@ -476,6 +642,7 @@ def main(argv: list[str] | None = None) -> int:
         alliance_directory=args.alliance_directory,
         alliance_account_id=args.alliance_account_id,
         alliance_stale_seconds=args.alliance_stale_seconds,
+        allied_history_dbs=tuple(args.allied_history_db),
     )
     if not app.static_root.is_dir():
         raise SystemExit(f"dashboard static directory is missing: {app.static_root}")

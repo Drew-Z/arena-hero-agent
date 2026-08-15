@@ -10,12 +10,10 @@
   <header class="topbar">
     <div class="brand">Arena Hero 战术地图</div>
     <div class="metrics" aria-live="polite">
+      <div id="account-status" class="account-status" aria-label="账号资源与兵力"></div>
       <span>Tick <strong id="metric-tick">--</strong></span>
-      <span>资源 <strong id="metric-resources">--/--</strong></span>
-      <span>人口 <strong id="metric-population">--</strong></span>
-      <span>兵力 <strong id="metric-force">--</strong></span>
-      <span>态势 <strong id="metric-posture">--</strong></span>
-      <span>敌情 <strong id="metric-enemies">--</strong></span>
+      <span class="secondary-metric">态势 <strong id="metric-posture">--</strong></span>
+      <span class="secondary-metric">敌情 <strong id="metric-enemies">--</strong></span>
     </div>
     <nav class="controls" aria-label="历史回放控制">
       <button id="previous-tick" class="icon-button" title="上一个 Tick" aria-label="上一个 Tick">‹</button>
@@ -150,10 +148,13 @@
         </form>
         <form id="alliance-form" class="config-form">
           <h3>联盟靠拢</h3>
+          <label class="wide checkbox-label">
+            <input id="alliance-rally-enabled" type="checkbox"> 开启小号 Core 向大号靠拢
+          </label>
           <label class="wide">与盟主保持距离（格）
             <input id="alliance-rally-radius" type="number" min="1" max="256" value="12" required>
           </label>
-          <button type="submit">保存靠拢距离</button>
+          <button type="submit">保存联盟靠拢</button>
           <p id="alliance-status" class="form-status" aria-live="polite"></p>
         </form>
         <div class="control-section">
