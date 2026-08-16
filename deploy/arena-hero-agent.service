@@ -11,7 +11,7 @@ Group=arena-hero
 WorkingDirectory=/opt/arena-hero-agent/current
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
-Environment=ARENA_WORKER_TARGET=12
+Environment=ARENA_WORKER_TARGET=18
 Environment=ARENA_BEACON_POLICY=retreat
 Environment=ARENA_TUNING_GENERATION=0
 EnvironmentFile=/etc/arena-hero-agent.env

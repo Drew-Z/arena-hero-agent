@@ -42,7 +42,12 @@ DEFAULT_BASE_URL = "https://api.arenahero.io"
 DEFAULT_COMPATIBILITY_MARKER = Path(
     "/var/lib/arena-hero-version/compatibility-hold.json"
 )
-DEFAULT_WORKER_TARGET = 12
+# The prize target is an inventory goal, not a reason to chase the Beacon.
+# Keep a 10-resource capacity buffer so two Unit losses do not immediately
+# reduce the Core below the 150-resource redemption threshold.
+RESOURCE_REDEMPTION_TARGET = 150
+RESOURCE_CAPACITY_BUFFER = 10
+DEFAULT_WORKER_TARGET = 18
 DEFAULT_BEACON_POLICY = "retreat"
 BASE_WORKER_TARGET = 6
 CORE_RESOURCE_RESERVE = 10
@@ -52,9 +57,14 @@ EARLY_DEFENSE_RESERVE = 15
 LONG_TERM_DEFENSE_RESERVE = 15
 EARLY_DEFENSE_VANGUARD_TARGET = 1
 EARLY_DEFENSE_RANGER_TARGET = 1
-DEFENSE_VANGUARD_TARGET = 4
-DEFENSE_RANGER_TARGET = 4
-PLANNED_POPULATION_CAP = 20
+MIDGAME_WORKER_GOAL = 12
+MIDGAME_VANGUARD_TARGET = 4
+MIDGAME_RANGER_TARGET = 4
+DEFENSE_VANGUARD_TARGET = 7
+DEFENSE_RANGER_TARGET = 7
+PLANNED_POPULATION_CAP = (
+    (RESOURCE_REDEMPTION_TARGET + RESOURCE_CAPACITY_BUFFER + 4) // 5
+)
 MAX_WORKER_TARGET = (
     PLANNED_POPULATION_CAP - DEFENSE_VANGUARD_TARGET - DEFENSE_RANGER_TARGET
 )
@@ -1696,6 +1706,13 @@ class CoreFarmer:
         if (
             len(turn.vanguards) < EARLY_DEFENSE_VANGUARD_TARGET
             or len(turn.rangers) < EARLY_DEFENSE_RANGER_TARGET
+        ):
+            return "FORTIFY"
+        if len(turn.workers) < min(MIDGAME_WORKER_GOAL, self.worker_target):
+            return "EXPANSION"
+        if (
+            len(turn.vanguards) < min(MIDGAME_VANGUARD_TARGET, DEFENSE_VANGUARD_TARGET)
+            or len(turn.rangers) < min(MIDGAME_RANGER_TARGET, DEFENSE_RANGER_TARGET)
         ):
             return "FORTIFY"
         if len(turn.workers) < self.worker_target:
@@ -4478,6 +4495,38 @@ class CoreFarmer:
                 core.spawn(UnitType.RANGER)
                 return
 
+            # Once the worker economy reaches its middle milestone, pause
+            # worker growth until a 4V/4R screen exists. This keeps the Core
+            # from spending a long vulnerable stretch with only the 1V/1R
+            # emergency pair while still allowing the 18-worker end state.
+            mid_worker_goal = min(MIDGAME_WORKER_GOAL, self.worker_target)
+            mid_vanguard_goal = min(MIDGAME_VANGUARD_TARGET, DEFENSE_VANGUARD_TARGET)
+            mid_ranger_goal = min(MIDGAME_RANGER_TARGET, DEFENSE_RANGER_TARGET)
+            mid_force_complete = (
+                len(turn.workers) < mid_worker_goal
+                or (
+                    len(turn.vanguards) >= mid_vanguard_goal
+                    and len(turn.rangers) >= mid_ranger_goal
+                )
+            )
+            if (
+                len(turn.workers) >= mid_worker_goal
+                and len(turn.vanguards) < mid_vanguard_goal
+                and available_resources >= EARLY_DEFENSE_RESERVE + vanguard_cost
+                and economic_expansion_is_safe
+            ):
+                core.spawn(UnitType.VANGUARD)
+                return
+            if (
+                len(turn.workers) >= mid_worker_goal
+                and len(turn.vanguards) >= mid_vanguard_goal
+                and len(turn.rangers) < mid_ranger_goal
+                and available_resources >= EARLY_DEFENSE_RESERVE + ranger_cost
+                and economic_expansion_is_safe
+            ):
+                core.spawn(UnitType.RANGER)
+                return
+
             if (
                 self.recovery_mode
                 and len(turn.workers)
@@ -4493,6 +4542,7 @@ class CoreFarmer:
                 )
             if (
                 len(turn.workers) < self.worker_target
+                and mid_force_complete
                 and available_resources >= expansion_threshold
                 and economic_expansion_is_safe
             ):
@@ -5003,6 +5053,27 @@ class _AcceptedTurnWatchdog:
             return
 
 
+def _events_with_watchdog(
+    game: ArenaHeroClient,
+    watchdog: _AcceptedTurnWatchdog,
+) -> Iterable[object]:
+    """Convert a watchdog-triggered SDK close into a transient failure.
+
+    The SDK reports a client closed by another thread as ``ConfigurationError``.
+    That is a transport recovery condition here, not a bad deployment setting;
+    preserving it as ``OSError`` lets systemd restart the Agent.
+    """
+
+    try:
+        yield from game.events()
+    except ArenaHeroError as exc:
+        if watchdog.timed_out.is_set():
+            raise OSError(
+                "no accepted Turn received before the unattended recovery timeout"
+            ) from exc
+        raise
+
+
 def play(
     api_key: str,
     *,
@@ -5028,7 +5099,7 @@ def play(
     with ArenaHeroClient(api_key=api_key, base_url=base_url) as game:
         watchdog = _AcceptedTurnWatchdog(game, stale_turn_timeout_seconds)
         with watchdog:
-            for event in game.events():
+            for event in _events_with_watchdog(game, watchdog):
                 if isinstance(event, Received):
                     if warning := _manual_override_summary(event):
                         print(warning, file=sys.stderr, flush=True)

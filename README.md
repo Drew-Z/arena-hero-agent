@@ -13,7 +13,7 @@ This is a community project and is not an official Arena Hero product.
 
 ## Highlights
 
-- Builds toward `12 Workers + 4 Vanguards + 4 Rangers = 20`, using the complete base-price fleet before v0.14 dynamic spawn pricing starts at Unit 21.
+- Builds toward `18 Workers + 7 Vanguards + 7 Rangers = 32`, providing 160 Core capacity for the 150-resource redemption target with a two-Unit buffer.
 - Moves the Core away from the Beacon, prioritizes collection and survival, and maintains distributed Core defense.
 - Classifies lifecycle, threat, and Unit missions independently, including activity alerts, pre-evasion, engagement, multi-axis breakout, and detached-squad return.
 - Scouts stale map regions, invalidates depleted resource memory through real line of sight, returns cargo, and recovers dropped cargo after losses.
@@ -165,7 +165,7 @@ The separate optimizer can update a narrow runtime configuration and restart the
 Common Agent options:
 
 ```text
---worker-target 12
+--worker-target 18
 --beacon-policy retreat
 --base-url https://api.arenahero.io
 --compatibility-marker PATH

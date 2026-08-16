@@ -55,7 +55,7 @@ manually verify edited links and examples.
 
 - Use the official Arena Hero SDK; do not reproduce transport or state-model logic.
 - Treat every Turn as a complete authoritative replacement and submit only current-Tick plans.
-- Keep normal production at or below the 20-Unit base-price fleet. Any dynamic-price expansion to Unit 21 or later requires an explicit strategy goal, SDK-price checks in every production branch, and focused tests.
+- Keep normal production at or below the tested 32-Unit redemption profile. Any dynamic-price expansion to Unit 21 or later requires an explicit strategy goal, SDK-price checks in every production branch, and focused tests.
 - Add focused tests for tactic decisions and all configuration behavior.
 - Keep model output advisory. A model must not enter the per-Tick action path.
 - Document any new process that can write configuration, restart services, or run with elevated privileges.

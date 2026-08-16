@@ -34,7 +34,7 @@ services:
     command:
       - arena-hero-agent
       - --worker-target
-      - "${ARENA_WORKER_TARGET:-12}"
+      - "${ARENA_WORKER_TARGET:-18}"
       - --beacon-policy
       - "${ARENA_BEACON_POLICY:-retreat}"
       - --no-compatibility-marker

@@ -3,8 +3,8 @@ param(
     [string]$PythonPath,
     [string]$EnvFile = ".env",
     [string]$LogFile = "arena_farmer.log",
-    [ValidateRange(1, 12)]
-    [int]$WorkerTarget = 12,
+    [ValidateRange(1, 18)]
+    [int]$WorkerTarget = 18,
     [ValidateSet("hold", "pursue", "retreat")]
     [string]$BeaconPolicy = "retreat",
     [string]$BaseUrl,

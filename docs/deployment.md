@@ -23,7 +23,7 @@ Install Python 3.11 or newer, then run from PowerShell:
 Useful overrides:
 
 ```powershell
-.\start_agent.ps1 -WorkerTarget 12 -BeaconPolicy retreat -NoCompatibilityMarker
+.\start_agent.ps1 -WorkerTarget 18 -BeaconPolicy retreat -NoCompatibilityMarker
 ```
 
 Stop with `Ctrl+C`. When using `start_agent.cmd`, an initialization failure pauses the terminal so the error remains visible.

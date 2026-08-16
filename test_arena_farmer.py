@@ -14,6 +14,7 @@ from uuid import UUID
 from arena_hero import (
     Accepted,
     CommandPlan,
+    ConfigurationError,
     Direction,
     PlayerState,
     Received,
@@ -3217,29 +3218,29 @@ class CoreFarmerTests(unittest.TestCase):
         tactic.choose_actions(reacquired)
         self.assertEqual(tactic.isolated_core_target_id, UUID(ENEMY_1))
 
-    def test_worker_limit_reserves_eight_defense_slots(self) -> None:
-        CoreFarmer(worker_target=12)
-        with self.assertRaisesRegex(ValueError, "between 1 and 12"):
-            CoreFarmer(worker_target=13)
+    def test_worker_limit_reserves_fourteen_defense_slots(self) -> None:
+        CoreFarmer(worker_target=18)
+        with self.assertRaisesRegex(ValueError, "between 1 and 18"):
+            CoreFarmer(worker_target=19)
 
-    def test_population_hard_stops_at_20_without_self_destruct(self) -> None:
+    def test_population_hard_stops_at_32_without_self_destruct(self) -> None:
         units = [
             unit(
                 f"20000000-0000-4000-8000-{index:012x}",
                 (
                     "WORKER"
-                    if index < 12
+                    if index < 18
                     else "VANGUARD"
-                    if index < 16
+                    if index < 25
                     else "RANGER"
                 ),
                 (20 + index, 20),
-                cargo=0 if index < 12 else None,
+                cargo=0 if index < 18 else None,
             )
-            for index in range(20)
+            for index in range(32)
         ]
-        turn = make_turn(resources=95, units=units)
-        tactic = CoreFarmer(worker_target=12, beacon_policy="hold")
+        turn = make_turn(resources=150, units=units)
+        tactic = CoreFarmer(worker_target=18, beacon_policy="hold")
         tactic.choose_actions(turn)
         queued = turn.plan.model_dump(mode="json", exclude_none=True)
 
@@ -3253,6 +3254,89 @@ class CoreFarmerTests(unittest.TestCase):
                 for action in queued.get("unit_actions", {}).values()
             )
         )
+
+    def test_middle_screen_completes_before_worker_thirteen(self) -> None:
+        workers = self._workers(12)
+        three_vanguards = [
+            unit(VANGUARD_1, "VANGUARD", (3, 0)),
+            unit(VANGUARD_2, "VANGUARD", (4, 0)),
+            unit(VANGUARD_3, "VANGUARD", (5, 0)),
+        ]
+        one_ranger = [unit(RANGER_1, "RANGER", (0, 3))]
+
+        queued = plan(
+            make_turn(
+                resources=100,
+                units=workers + three_vanguards + one_ranger,
+            ),
+            beacon_policy="hold",
+        )
+
+        self.assertEqual(queued["core_action"]["unit_type"], "VANGUARD")
+
+    def test_worker_growth_resumes_after_middle_screen(self) -> None:
+        workers = self._workers(12)
+        middle_screen = [
+            *[
+                unit(
+                    f"21000000-0000-4000-8000-{index:012x}",
+                    "VANGUARD",
+                    (3 + index, 0),
+                )
+                for index in range(4)
+            ],
+            *[
+                unit(
+                    f"22000000-0000-4000-8000-{index:012x}",
+                    "RANGER",
+                    (3 + index, 2),
+                )
+                for index in range(4)
+            ],
+        ]
+
+        queued = plan(
+            make_turn(resources=100, units=workers + middle_screen),
+            beacon_policy="hold",
+        )
+
+        self.assertEqual(queued["core_action"]["unit_type"], "WORKER")
+
+    def test_final_force_reaches_160_capacity_profile(self) -> None:
+        workers = [
+            unit(
+                f"23000000-0000-4000-8000-{index:012x}",
+                "WORKER",
+                (20 + index, 20),
+                cargo=0,
+            )
+            for index in range(18)
+        ]
+        six_vanguards = [
+            unit(
+                f"24000000-0000-4000-8000-{index:012x}",
+                "VANGUARD",
+                (20 + index, 22),
+            )
+            for index in range(6)
+        ]
+        seven_rangers = [
+            unit(
+                f"25000000-0000-4000-8000-{index:012x}",
+                "RANGER",
+                (20 + index, 24),
+            )
+            for index in range(7)
+        ]
+
+        turn = make_turn(
+            resources=150,
+            units=workers + six_vanguards + seven_rangers,
+        )
+        queued = plan(turn, beacon_policy="hold")
+
+        self.assertEqual(turn.resource_capacity, 155)
+        self.assertEqual(queued["core_action"]["unit_type"], "VANGUARD")
 
     def test_nineteen_units_build_fourth_vanguard_at_base_price(self) -> None:
         units = [
@@ -4492,6 +4576,38 @@ class EventLoopTests(unittest.TestCase):
 
         self.assertTrue(instances[0].closed.is_set())
         self.assertIn("restarting the Agent", errors.getvalue())
+
+    def test_watchdog_client_closed_error_remains_transient(self) -> None:
+        class FakeGame:
+            def __init__(self, **_kwargs: object) -> None:
+                self.closed = threading.Event()
+
+            def __enter__(self) -> "FakeGame":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                self.close()
+
+            def close(self) -> None:
+                self.closed.set()
+
+            def events(self):
+                self.closed.wait(timeout=1)
+                raise ConfigurationError("the client is closed")
+                yield None
+
+        with (
+            patch("arena_farmer.ArenaHeroClient", FakeGame),
+            redirect_stderr(io.StringIO()),
+            self.assertRaisesRegex(OSError, "unattended recovery timeout"),
+        ):
+            play(
+                "test-only-key",
+                base_url="https://example.test",
+                worker_target=18,
+                beacon_policy="retreat",
+                stale_turn_timeout_seconds=0.05,
+            )
 
     def test_stale_turn_watchdog_rejects_nonfinite_timeouts(self) -> None:
         for timeout in (float("nan"), float("inf")):
