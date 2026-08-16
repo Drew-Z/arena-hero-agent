@@ -1,28 +1,32 @@
 # Strategy Profile
 
-The default profile optimizes for long-term Core survival and resource accumulation rather than Beacon progress or indiscriminate combat.
+The default profile optimizes for long-term Core survival and resource accumulation rather than Beacon progress or indiscriminate combat. The current
+milestone is to hold 150 Core resources for the external prize redemption.
 
 ## Population Plan
 
-The mature target is:
+The mature target is a 32-Unit inventory-capacity profile:
 
 | Unit | Target | Role |
 | --- | ---: | --- |
-| Worker | 12 | Harvest, deposit, scout, observe, and recover dropped cargo. |
-| Vanguard | 4 | Outer screen, route screening, durable Core defense, and bounded assault reinforcement. |
-| Ranger | 4 | Inner Core defense and ranged stationary-target clearing. |
-| Total | 20 | Uses every base-price slot; the 21st Unit is the first dynamically priced spawn. |
+| Worker | 18 | Harvest, deposit, scout, observe, and recover dropped cargo. |
+| Vanguard | 7 | Outer screen, route screening, durable Core defense, and bounded assault reinforcement. |
+| Ranger | 7 | Inner Core defense, vision, and ranged stationary-target clearing. |
+| Total | 32 | Provides 160 capacity: 150 target plus a 10-resource buffer for two Unit losses. |
 
 Gameplay v0.14 has no per-Tick upkeep or maintenance damage. Production still
 reserves resources for healing, shield repair, and emergency replacement. Every
 spawn branch previews the current price with the official SDK's `unit_cost()`;
-the settled `CORE_SPAWN_SUCCEEDED.values.cost` remains authoritative. The
-normal profile does not build Unit 21 or later automatically.
+the settled `CORE_SPAWN_SUCCEEDED.values.cost` remains authoritative. This
+profile deliberately crosses the dynamic-price tiers because a 20-Unit profile
+can store only 100 resources and cannot reach the milestone.
 
-At a pre-spawn population of 20, prices rise to Worker 7, Vanguard 13, and
-Ranger 16. Higher tiers continue compounding every five population. Expansion
-beyond 20 therefore requires a separate, measured strategy change rather than
-being inferred from a temporary resource surplus.
+The production sequence is staged: reach 8 Workers and the 1V/1R emergency
+pair, grow to 12 Workers, pause for a 4V/4R middle screen, then grow to 18
+Workers and finish at 7V/7R. Once 32 living Units exist, production stops
+unless an emergency replacement is needed. If population falls, Core capacity
+falls immediately; the 160-capacity buffer is intentional, not permission to
+send the whole fleet into a raid.
 
 ## Core Safety
 
@@ -39,6 +43,8 @@ being inferred from a temporary resource surplus.
 - An emergency migration whose destination does not worsen projected damage or aggregate enemy risk is allowed to finish instead of being cancelled for an immediate heal or cargo deposit. A hard-blocked or riskier destination can still cancel.
 - Core and fleet attack memory are separate: a remote Worker taking damage recalls the defense posture but does not by itself move the Core.
 - A compatibility marker forces conservative behavior when published rules, the server contract, or the SDK no longer match the tested profile.
+- The Core remains on the `retreat` Beacon policy while stockpiling; the 150
+  milestone never starts a Beacon campaign.
 
 ## Economy and Scouting
 
@@ -85,7 +91,7 @@ being inferred from a temporary resource surplus.
 
 ## Current Optimization Priority
 
-The strategy currently has focused unit tests and structured diagnostics for economy stalls, blocking, Core survival, scouting coverage, combat pressure, lifecycle events, dynamic spawn prices, repeated affordability failures, and unexplained resource loss. New tuning should be driven by a captured unhealthy window rather than by increasing fleet size or adding a model to the Tick loop.
+The strategy currently has focused unit tests and structured diagnostics for economy stalls, blocking, Core survival, scouting coverage, combat pressure, lifecycle events, dynamic spawn prices, repeated affordability failures, and unexplained resource loss. The 150-resource profile is an explicit tested exception to the old 20-Unit cap; new tuning should still be driven by a captured unhealthy window rather than by blindly increasing fleet size or adding a model to the Tick loop.
 
 The first hierarchical-controller stage is implemented: every planned Turn now
 records `global_posture`, `threat_level`, and a deterministic `threat_reason`.

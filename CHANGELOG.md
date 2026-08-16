@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Changed
+
+- Added an explicit 150-resource redemption profile: staged 18 Worker / 7
+  Vanguard / 7 Ranger production reaches 160 Core capacity while preserving a
+  two-Unit loss buffer and the Beacon-avoiding retreat policy.
+- Fixed unattended recovery after a stale-Turn watchdog close. The SDK's
+  client-closed configuration exception is now reclassified as a transient
+  failure so systemd can restart the Agent instead of honoring
+  `RestartPreventExitStatus=2` and stopping permanently.
+
 ## [0.2.0] - 2026-08-08
 
 ### Added

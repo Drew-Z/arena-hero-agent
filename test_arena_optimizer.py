@@ -31,7 +31,7 @@ def healthy_log(
     *,
     deposits: int = 1,
     extra_event: str | None = None,
-    worker_target: int = 12,
+    worker_target: int = 18,
     generation: int = 0,
 ) -> str:
     lines = []
@@ -41,8 +41,8 @@ def healthy_log(
             events.append(f"{extra_event}:1")
         tick = start_tick + index * 25
         lines.append(
-            f"tick={tick} accepted=True resources=20/80 workers=12 "
-            f"vanguards=2 rangers=2 cargo=1 visible_resources=2 "
+            f"tick={tick} accepted=True resources=20/160 workers=18 "
+            f"vanguards=7 rangers=7 cargo=1 visible_resources=2 "
             f"actions=MOVE:10 events={','.join(events)} recovery=0 "
             f"danger_cells=0 core_hp=5 core_shield=5 "
             f"worker_target={worker_target} beacon_policy=retreat "
@@ -152,21 +152,22 @@ class OptimizerTests(unittest.TestCase):
 
     def test_candidate_allowlist_locks_beacon_policy(self) -> None:
         self.assertEqual(_candidate_from_mapping(asdict(Candidate(12))), Candidate(12))
+        self.assertEqual(_candidate_from_mapping(asdict(Candidate(18))), Candidate(18))
         with self.assertRaisesRegex(ValueError, "candidate_not_allowed"):
             _candidate_from_mapping({"worker_target": 14, "beacon_policy": "pursue"})
         with self.assertRaisesRegex(ValueError, "candidate_not_allowed"):
             _candidate_from_mapping({"worker_target": 17, "beacon_policy": "retreat"})
 
     def test_next_candidate_only_scales_up_and_honors_blacklist(self) -> None:
-        self.assertEqual(_next_candidate(Candidate(10), 100, {}), Candidate(12))
-        blocked = {Candidate(12).key: 101}
-        self.assertIsNone(_next_candidate(Candidate(10), 100, blocked))
-        self.assertIsNone(_next_candidate(Candidate(12), 100, {}))
+        self.assertEqual(_next_candidate(Candidate(12), 100, {}), Candidate(18))
+        blocked = {Candidate(18).key: 101}
+        self.assertIsNone(_next_candidate(Candidate(12), 100, blocked))
+        self.assertIsNone(_next_candidate(Candidate(18), 100, {}))
 
     def test_runtime_config_bootstraps_and_rejects_unknown_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "runtime.env"
-            self.assertEqual(read_runtime_config(path), Candidate(12))
+            self.assertEqual(read_runtime_config(path), Candidate(18))
             self.assertIn("ARENA_BEACON_POLICY=retreat", path.read_text())
             path.write_text(
                 "ARENA_WORKER_TARGET=14\nARENA_BEACON_POLICY=pursue\n",
@@ -197,7 +198,7 @@ class OptimizerTests(unittest.TestCase):
     def test_apply_candidate_rolls_back_when_health_check_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "runtime.env"
-            write_runtime_config(path, Candidate(10), 0)
+            write_runtime_config(path, Candidate(12), 0)
             checked: list[int] = []
 
             def health(generation: int) -> bool:
@@ -206,14 +207,14 @@ class OptimizerTests(unittest.TestCase):
 
             applied, detail = apply_candidate(
                 path,
-                Candidate(12),
+                Candidate(18),
                 1,
                 systemctl_runner=SystemctlRunner(),
                 health_checker=health,
             )
             self.assertFalse(applied)
             self.assertEqual(detail, "apply_failed_rolled_back")
-            self.assertEqual(read_runtime_config(path), Candidate(10))
+            self.assertEqual(read_runtime_config(path), Candidate(12))
             self.assertEqual(checked, [1, 0])
 
     def test_four_baselines_start_safe_candidate(self) -> None:
@@ -222,12 +223,12 @@ class OptimizerTests(unittest.TestCase):
             runtime = root / "runtime.env"
             state = root / "state.json"
             report = root / "latest.json"
-            write_runtime_config(runtime, Candidate(10), 0)
+            write_runtime_config(runtime, Candidate(12), 0)
             save_state(
                 state,
                 OptimizerState(
-                    active=asdict(Candidate(10)),
-                    last_good=asdict(Candidate(10)),
+                    active=asdict(Candidate(12)),
+                    last_good=asdict(Candidate(12)),
                 ),
             )
             runner = SystemctlRunner()
@@ -240,7 +241,7 @@ class OptimizerTests(unittest.TestCase):
                         report_path=report,
                         journal_text=healthy_log(
                             1000 + index * 600,
-                            worker_target=10,
+                            worker_target=12,
                         ),
                         now=1000 + index,
                         systemctl_runner=runner,
@@ -248,7 +249,7 @@ class OptimizerTests(unittest.TestCase):
                     decisions.append(result["decision"])
             self.assertEqual(decisions[:3], ["baseline_collect"] * 3)
             self.assertEqual(decisions[3], "candidate_started")
-            self.assertEqual(result["active"]["worker_target"], 12)
+            self.assertEqual(result["active"]["worker_target"], 18)
 
     def test_moving_core_blocks_candidate_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -256,10 +257,10 @@ class OptimizerTests(unittest.TestCase):
             runtime = root / "runtime.env"
             state_path = root / "state.json"
             report = root / "latest.json"
-            write_runtime_config(runtime, Candidate(10), 0)
+            write_runtime_config(runtime, Candidate(12), 0)
             state = OptimizerState(
-                active=asdict(Candidate(10)),
-                last_good=asdict(Candidate(10)),
+                active=asdict(Candidate(12)),
+                last_good=asdict(Candidate(12)),
                 baseline_windows=[
                     {"score": 5.0, "healthy": True},
                     {"score": 5.0, "healthy": True},
@@ -271,7 +272,7 @@ class OptimizerTests(unittest.TestCase):
                 runtime_path=runtime,
                 state_path=state_path,
                 report_path=report,
-                journal_text=healthy_log(2000, worker_target=10),
+                journal_text=healthy_log(2000, worker_target=12),
                 now=2000,
                 systemctl_runner=SystemctlRunner(core_state="MOVING"),
             )
@@ -284,10 +285,10 @@ class OptimizerTests(unittest.TestCase):
             runtime = root / "runtime.env"
             state_path = root / "state.json"
             report = root / "latest.json"
-            write_runtime_config(runtime, Candidate(12), 1)
+            write_runtime_config(runtime, Candidate(18), 1)
             state = OptimizerState(
-                active=asdict(Candidate(12)),
-                last_good=asdict(Candidate(10)),
+                active=asdict(Candidate(18)),
+                last_good=asdict(Candidate(12)),
                 generation=1,
                 candidate_started_tick=1000,
             )
@@ -300,14 +301,14 @@ class OptimizerTests(unittest.TestCase):
                     journal_text=healthy_log(
                         2000,
                         extra_event="CORE_DESTROYED",
-                        worker_target=12,
+                        worker_target=18,
                         generation=1,
                     ),
                     now=3000,
                     systemctl_runner=SystemctlRunner(generation=1),
                 )
             self.assertEqual(result["decision"], "rollback")
-            self.assertEqual(result["active"]["worker_target"], 10)
+            self.assertEqual(result["active"]["worker_target"], 12)
 
     def test_candidate_promotes_only_after_measured_improvement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -315,10 +316,10 @@ class OptimizerTests(unittest.TestCase):
             runtime = root / "runtime.env"
             state_path = root / "state.json"
             report = root / "latest.json"
-            write_runtime_config(runtime, Candidate(12), 1)
+            write_runtime_config(runtime, Candidate(18), 1)
             state = OptimizerState(
-                active=asdict(Candidate(12)),
-                last_good=asdict(Candidate(10)),
+                active=asdict(Candidate(18)),
+                last_good=asdict(Candidate(12)),
                 generation=1,
                 candidate_started_tick=1000,
                 warmup_windows=1,
@@ -337,14 +338,14 @@ class OptimizerTests(unittest.TestCase):
                 journal_text=healthy_log(
                     2000,
                     deposits=2,
-                    worker_target=12,
+                    worker_target=18,
                     generation=1,
                 ),
                 now=3000,
                 systemctl_runner=SystemctlRunner(generation=1),
             )
             self.assertEqual(result["decision"], "promote")
-            self.assertEqual(result["state"]["last_good"]["worker_target"], 12)
+            self.assertEqual(result["state"]["last_good"]["worker_target"], 18)
 
     def test_reports_and_state_are_valid_json(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -352,7 +353,7 @@ class OptimizerTests(unittest.TestCase):
             runtime = root / "runtime.env"
             state = root / "state.json"
             report = root / "latest.json"
-            write_runtime_config(runtime, Candidate(12), 0)
+            write_runtime_config(runtime, Candidate(18), 0)
             optimize_once(
                 runtime_path=runtime,
                 state_path=state,
